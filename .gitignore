@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Local-only config / tool state
+.claude/
+
+# Generated output artifacts
+frames/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
