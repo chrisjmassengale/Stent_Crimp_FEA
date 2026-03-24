@@ -897,12 +897,14 @@ def main(frames_dir="./frames"):
     glEnable(GL_NORMALIZE); setup_lighting()
     print(f"[viewer] GPU: {glGetString(GL_RENDERER).decode()}")
 
-    settings = load_settings()
-    player   = FramePlayer(frames_dir)
-    stars    = StarField()
-    camera   = Camera()
-    panel    = UIPanel(PANEL_W, WIN_H, settings, player)
+    settings   = load_settings()
+    player     = FramePlayer(frames_dir)
+    stars      = StarField()
+    camera     = Camera()
+    panel      = UIPanel(PANEL_W, WIN_H, settings, player)
     panel.init()
+    tube       = DeliveryTube()
+    tube_setup = False
 
     panel_tex = None
     clock     = pygame.time.Clock()
@@ -914,6 +916,12 @@ def main(frames_dir="./frames"):
 
         # Ensure anchors loaded (needs GL context, done lazily)
         player.ensure_ready()
+        if player._gl_ready and not tube_setup:
+            tube.setup(player._cx, player._cy,
+                       float(player._z.min()), float(player._z.max()))
+            tube_setup = True
+        if tube_setup:
+            tube.update(panel.cur_frame, player.count - 1)
 
         for ev in pygame.event.get():
             if ev.type==QUIT:                                     _quit(panel_tex,player); return
