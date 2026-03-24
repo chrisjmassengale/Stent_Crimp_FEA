@@ -249,6 +249,21 @@ def main():
     print(f"  frame_000.stl = fully crimped")
     print(f"  frame_099.stl = fully deployed")
     print("=" * 60)
+
+    # Launch the interactive viewer
+    viewer_path = os.path.join(os.path.dirname(__file__), "viewer.py")
+    if os.path.isfile(viewer_path):
+        print("\nLaunching viewer...")
+        try:
+            import subprocess
+            subprocess.Popen(
+                [sys.executable, viewer_path, args.output_dir],
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+        except Exception as e:
+            print(f"Could not launch viewer: {e}")
+            print(f"Run manually:  python viewer.py {args.output_dir}")
+
     return 0
 
 
