@@ -129,21 +129,30 @@ def export_frames(mesh: trimesh.Trimesh,
             tube_tip_z = z_max - z_front * z_span
             trans_len  = transition_frac * z_span
 
-            # Global expansion factor
-            released_length_frac = np.clip((z_max - tube_tip_z) / z_span, 0.0, 1.0)
-            global_exp = released_length_frac ** expansion_exponent
-            r_max = crimp_r + (deploy_r - crimp_r) * global_exp
-
             # Crown dwell
             z_effective = z_orig - dwell_per_vertex
 
-            # Per-vertex released fraction
+            # Per-vertex released fraction (smoothstep over transition zone)
             d = z_effective - tube_tip_z
             released = _smoothstep(d / trans_len)
             snap     = _snap_curve(released, snap_speed)
 
-            # Target centerline radius — SAME FORMULA FOR EVERY VERTEX
-            r_centerline = crimp_r + (r_max - crimp_r) * snap
+            # Two-phase superelastic deployment
+            # Phase 1 — snap-back : strut exits tube → springs to 97 % of
+            #            deployed radius (superelastic, instantaneous per-vertex)
+            # Phase 2 — thermal   : slow creep from 97 % → 100 % as struts
+            #            warm above Af into body-temperature environment.
+            #            expansion_exponent controls warm-up rate (higher = faster)
+            _SNAP_FRAC   = 0.97
+            t_global     = float(np.clip(z_front, 0., 1.))   # = released length frac
+            t_release_v  = np.clip((z_max - z_effective) / max(z_span, 1e-6), 0., 1.)
+            t_out_v      = np.clip(t_global - t_release_v, 0., 1.)
+            thermal_v    = _smoothstep(np.minimum(t_out_v * expansion_exponent * 5., 1.))
+
+            r_snap_tgt   = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
+            r_centerline = (crimp_r
+                            + (r_snap_tgt - crimp_r)   * snap
+                            + (deploy_r   - r_snap_tgt) * thermal_v * released)
             r_new = r_centerline + r_offset
             z_new = z_orig
 
