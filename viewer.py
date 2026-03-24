@@ -350,6 +350,101 @@ class FramePlayer:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Delivery tube
+#
+# Semi-transparent hollow cylinder that slides as a rigid body: the open end
+# (tube_top) tracks the deployment front exactly at
+#     tube_top = z_max - t * z_span
+# The tube translates downward at the same speed as the stent deployment
+# propagation, so tube_bottom = tube_top - z_span.
+# Dimensions: 0.175" ID × 0.205" OD  (converted to mm).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DeliveryTube:
+    N     = 48                       # circumferential segments
+    R_I   = 0.175 * 25.4 / 2        # inner radius  2.2225 mm
+    R_O   = 0.205 * 25.4 / 2        # outer radius  2.6035 mm
+    ALPHA = 0.48
+
+    def __init__(self):
+        self._ready   = False
+        self._cx = self._cy = 0.
+        self._z_min = self._z_max = 0.
+        self._tube_top = self._tube_bot = 0.
+        self._z_span = 1.
+
+    def setup(self, cx, cy, z_min, z_max):
+        self._cx, self._cy = cx, cy
+        self._z_min, self._z_max = z_min, z_max
+        self._z_span = max(z_max - z_min, 1e-6)
+        self._tube_top = z_max
+        self._tube_bot = z_min
+        self._ready = True
+
+    def update(self, frame_idx, n_frames):
+        t = frame_idx / max(n_frames, 1)
+        self._tube_top = self._z_max - t * self._z_span   # open end tracks front
+        self._tube_bot = self._tube_top - self._z_span    # rigid body translation
+
+    def draw(self):
+        if not self._ready:
+            return
+        z_t, z_b = self._tube_top, self._tube_bot
+        cx, cy    = self._cx, self._cy
+        ri, ro    = self.R_I, self.R_O
+        N         = self.N
+
+        a  = np.linspace(0, 2.*np.pi, N, endpoint=False).astype(np.float32)
+        ca, sa = np.cos(a), np.sin(a)
+
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_LIGHTING)
+        glColor4f(0.74, 0.78, 0.88, self.ALPHA)
+        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (0.88, 0.92, 1.0, 1.))
+        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 82.)
+
+        # outer wall
+        glBegin(GL_QUAD_STRIP)
+        for i in range(N + 1):
+            c, s = ca[i % N], sa[i % N]
+            glNormal3f(c, s, 0.); glVertex3f(cx + ro*c, cy + ro*s, z_t)
+            glNormal3f(c, s, 0.); glVertex3f(cx + ro*c, cy + ro*s, z_b)
+        glEnd()
+
+        # inner wall (normal inward)
+        glBegin(GL_QUAD_STRIP)
+        for i in range(N + 1):
+            c, s = ca[i % N], sa[i % N]
+            glNormal3f(-c, -s, 0.); glVertex3f(cx + ri*c, cy + ri*s, z_b)
+            glNormal3f(-c, -s, 0.); glVertex3f(cx + ri*c, cy + ri*s, z_t)
+        glEnd()
+
+        # top annular cap — the open end (faces +z)
+        glBegin(GL_QUAD_STRIP)
+        for i in range(N + 1):
+            c, s = ca[i % N], sa[i % N]
+            glNormal3f(0., 0., 1.)
+            glVertex3f(cx + ro*c, cy + ro*s, z_t)
+            glVertex3f(cx + ri*c, cy + ri*s, z_t)
+        glEnd()
+
+        # bottom annular cap (faces -z)
+        glBegin(GL_QUAD_STRIP)
+        for i in range(N + 1):
+            c, s = ca[i % N], sa[i % N]
+            glNormal3f(0., 0., -1.)
+            glVertex3f(cx + ri*c, cy + ri*s, z_b)
+            glVertex3f(cx + ro*c, cy + ro*s, z_b)
+        glEnd()
+
+        glDepthMask(GL_TRUE)
+        glDisable(GL_BLEND)
+        glDisable(GL_LIGHTING)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Star field
 # ══════════════════════════════════════════════════════════════════════════════
 
