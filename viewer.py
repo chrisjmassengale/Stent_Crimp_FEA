@@ -967,6 +967,7 @@ def main(frames_dir="./frames"):
             glScalef(player.scale,player.scale,player.scale)
             c=player.centre; glTranslatef(-float(c[0]),-float(c[1]),-float(c[2]))
             player.draw(preview=panel.dirty)
+            if tube_setup: tube.draw()
 
         # 3 — Panel texture (re-upload only when dirty)
         if panel.needs_redraw:
