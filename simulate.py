@@ -69,6 +69,8 @@ def parse_args():
                    help="Global expansion curve exponent: lower=more constrained early (default: 0.6)")
     p.add_argument("--tine-flare", type=float, default=1.15,
                    help="Crown tine flare factor: tines expand to this * deployed_r (default: 1.15)")
+    p.add_argument("--no-viewer", action="store_true",
+                   help="Do not auto-launch the viewer after simulation completes")
     return p.parse_args()
 
 
