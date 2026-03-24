@@ -1,33 +1,24 @@
 """
-viewer.py — Interactive 3D Stent FEA Viewer.
+viewer.py — High-performance interactive 3D Stent FEA Viewer.
 
-Left pane  : Animated starfield + 3-D OpenGL stent model
-Right pane : Control panel — frame navigator, simulation parameters,
-             regenerate & save buttons.
+Rendering
+---------
+  Stars       : single glDrawArrays call (vertex arrays, bucketed by size)
+  Stent mesh  : VBO — one GPU draw call per frame, updated only on frame change
+  Real-time   : moving deployed/crimp diameter sliders rescales the mesh live
+                via glBufferSubData — no simulation re-run needed
+  Panel       : pygame Surface → GL texture, re-uploaded only when UI changes
 
-Mouse controls (in 3-D viewport)
----------------------------------
-  Left-drag          → Rotate
-  Scroll wheel       → Zoom
-  Ctrl + Left-drag   → Pan
-
-Frame navigation
----------------------------------
-  ← / →  or on-screen ◀ / ▶ buttons
-
-Parameter editing
----------------------------------
-  Drag slider OR right-click a slider value to type a number + Enter.
-  Changes are immediately shown as a scaled preview (yellow tint).
-  Click "Regenerate" to run the full simulation with the new values.
-  Click "Save Settings" to persist across sessions.
-
-Usage
----------------------------------
-  python viewer.py [frames_dir]      (default: ./frames)
+Controls
+--------
+  Left-drag          : Rotate
+  Scroll wheel       : Zoom
+  Ctrl + Left-drag   : Pan
+  ← / →             : Previous / next frame
+  Right-click slider : Type an exact value + Enter
 """
 
-import os, sys, json, math, time, threading, subprocess, random, copy
+import ctypes, os, sys, json, math, time, threading, subprocess, random, copy
 from pathlib import Path
 
 import numpy as np
@@ -36,54 +27,27 @@ import pygame
 from pygame.locals import (
     QUIT, KEYDOWN, MOUSEBUTTONDOWN, MOUSEBUTTONUP, MOUSEMOTION, MOUSEWHEEL,
     DOUBLEBUF, OPENGL, K_ESCAPE, K_LEFT, K_RIGHT, K_RETURN, K_BACKSPACE,
-    K_ESCAPE, KMOD_CTRL,
+    KMOD_CTRL,
 )
 
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
 except ImportError:
-    print("[viewer] PyOpenGL not found.  Install: pip install PyOpenGL PyOpenGL_accelerate")
+    print("[viewer] PyOpenGL not found.  pip install PyOpenGL PyOpenGL_accelerate")
     sys.exit(1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Layout & colour constants
+# Constants
 # ══════════════════════════════════════════════════════════════════════════════
 
-WIN_W    = 1440
-WIN_H    = 900
-PANEL_W  = 430
-VIEW_W   = WIN_W - PANEL_W
-TARGET_FPS = 60
+WIN_W, WIN_H = 1440, 900
+PANEL_W      = 430
+VIEW_W       = WIN_W - PANEL_W
+FPS          = 60
 
 SETTINGS_FILE = Path(__file__).parent / "viewer_settings.json"
-
-# UI colours (R, G, B) — used both for pygame and normalised for GL
-C_BG          = (12,  12,  30)
-C_PANEL       = (20,  20,  50)
-C_PANEL_EDGE  = (60,  65, 160)
-C_TEXT        = (215, 220, 255)
-C_TEXT_DIM    = (120, 125, 175)
-C_ACCENT      = (100, 140, 255)
-C_SLIDER_BG   = (38,  40,  88)
-C_SLIDER_FG   = (85, 120, 245)
-C_KNOB        = (195, 210, 255)
-C_BTN_FRAME   = (50,  50, 110)
-C_BTN_FRAME_H = (75,  75, 160)
-C_BTN_REGEN   = (38, 115,  55)
-C_BTN_REGEN_H = (52, 155,  72)
-C_BTN_SAVE    = (45,  70, 150)
-C_BTN_SAVE_H  = (60,  92, 195)
-C_PREVIEW     = (255, 200,  45)
-C_DIRTY_BG    = (35,  30,  10)
-C_OK          = (80, 210, 100)
-C_ERR         = (255,  70,  70)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Simulation parameter specifications
-# ══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_SETTINGS = {
     "input":               "stent.STL",
@@ -99,7 +63,7 @@ DEFAULT_SETTINGS = {
     "tine_flare":          1.15,
 }
 
-# (key, label, min, max, step, format)
+# (key, label, min, max, step, fmt)
 PARAM_SPECS = [
     ("crimp_diameter",      "Crimp Diameter (mm)",     1.0,  15.0,  0.1,  "{:.1f}"),
     ("deployed_diameter",   "Deployed Diameter (mm)", 10.0,  50.0,  0.5,  "{:.1f}"),
@@ -112,131 +76,315 @@ PARAM_SPECS = [
     ("tine_flare",          "Tine Flare",              1.0,   1.5,  0.01, "{:.2f}"),
 ]
 
+# Colours
+C_BG         = (12,  12,  30)
+C_PANEL      = (20,  20,  50)
+C_PANEL_EDGE = (60,  65, 160)
+C_TEXT       = (215, 220, 255)
+C_TEXT_DIM   = (115, 120, 170)
+C_ACCENT     = (100, 140, 255)
+C_SLIDER_BG  = (38,  40,  88)
+C_SLIDER_FG  = (85, 120, 245)
+C_KNOB       = (195, 210, 255)
+C_BTN_FRAME  = (50,  50, 110)
+C_BTN_FRAMEH = (75,  75, 160)
+C_BTN_REGEN  = (38, 115,  55)
+C_BTN_RGENH  = (52, 155,  72)
+C_BTN_SAVE   = (45,  70, 150)
+C_BTN_SAVEH  = (60,  92, 195)
+C_PREVIEW    = (255, 200,  45)
+C_DIRTY_BG   = (32,  28,   8)
+C_OK         = (80, 210, 100)
+C_ERR        = (255,  70,  70)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Settings persistence
+# Settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_settings() -> dict:
+def load_settings():
     s = copy.deepcopy(DEFAULT_SETTINGS)
     if SETTINGS_FILE.exists():
         try:
-            with open(SETTINGS_FILE) as f:
-                stored = json.load(f)
+            stored = json.loads(SETTINGS_FILE.read_text())
             for k in s:
                 if k in stored:
                     s[k] = stored[k]
-        except Exception as e:
-            print(f"[viewer] Settings load failed: {e}")
+        except Exception:
+            pass
     return s
 
-
-def save_settings(s: dict):
+def save_settings(s):
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(s, f, indent=2)
+        SETTINGS_FILE.write_text(json.dumps(s, indent=2))
     except Exception as e:
-        print(f"[viewer] Settings save failed: {e}")
+        print(f"[viewer] save failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Frame cache — lazy STL loader
+# MeshBuffer — VBO-backed stent renderer with real-time radial deform
+# ══════════════════════════════════════════════════════════════════════════════
+
+class MeshBuffer:
+    """
+    Stores one STL frame as an interleaved VBO:  [nx ny nz vx vy vz] × n_tris×3.
+
+    Real-time preview: call set_xy_scale(s) to rescale XY radially.
+    This updates only the needed bytes via glBufferSubData — no CPU re-upload.
+    """
+
+    def __init__(self):
+        self._vbo      = None
+        self._n_verts  = 0
+        self._base     = None   # (N, 6) float32 — pristine data, never modified
+        self.centre    = np.zeros(3, np.float32)
+        self.fit_scale = 1.0
+        self._xy_scale = 1.0
+
+    # ── load ─────────────────────────────────────────────────────────────────
+
+    def load(self, stl_path: str):
+        """Load STL, build packed array, upload to GPU."""
+        m   = trimesh.load(str(stl_path), process=False, force='mesh')
+        v   = m.vertices.astype(np.float32)
+        f   = m.faces.astype(np.int32)
+        fn  = m.face_normals.astype(np.float32)
+
+        # Expand to per-draw-vertex layout
+        v_exp = v[f].reshape(-1, 3)                 # (N*3, 3)
+        n_exp = np.repeat(fn, 3, axis=0)            # (N*3, 3)
+        data  = np.ascontiguousarray(
+            np.hstack([n_exp, v_exp]), dtype=np.float32)   # (N*3, 6)
+
+        self._base    = data.copy()
+        self._n_verts = len(data)
+        self.centre   = ((v.min(0) + v.max(0)) * 0.5).astype(np.float32)
+        ext           = float((v.max(0) - v.min(0)).max())
+        self.fit_scale= 20.0 / max(ext, 1e-6)
+        self._xy_scale= 1.0
+
+        # Upload
+        if self._vbo is None:
+            self._vbo = int(glGenBuffers(1))
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    # ── real-time XY rescale ─────────────────────────────────────────────────
+
+    def set_xy_scale(self, s: float):
+        """Rescale all vertex XY by s (radial diameter preview)."""
+        if self._base is None or abs(s - self._xy_scale) < 1e-5:
+            return
+        self._xy_scale = s
+        d = self._base.copy()
+        d[:, 3] *= s    # vx
+        d[:, 4] *= s    # vy
+        # Approximate normal update: scale nx,ny then renormalise
+        d[:, 0] *= s
+        d[:, 1] *= s
+        nlen = np.linalg.norm(d[:, :3], axis=1, keepdims=True)
+        d[:, :3] /= np.maximum(nlen, 1e-7)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, d.nbytes, d)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    # ── draw ─────────────────────────────────────────────────────────────────
+
+    def draw(self, preview: bool):
+        if self._vbo is None or self._n_verts == 0:
+            return
+        stride = 24   # 6 floats × 4 bytes
+
+        if preview:
+            glColor4f(1.0, 0.87, 0.30, 0.92)
+            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (0.5, 0.44, 0.15, 1.0))
+        else:
+            glColor4f(0.93, 0.94, 1.00, 1.00)
+            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (0.45, 0.45, 0.55, 1.0))
+        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 46.0)
+
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(0))
+        glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(12))
+
+        # Filled
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+        glDrawArrays(GL_TRIANGLES, 0, self._n_verts)
+
+        # Wireframe overlay
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+        glLineWidth(0.6)
+        glColor4f(0.3, 0.35, 0.60, 0.18)
+        glDrawArrays(GL_TRIANGLES, 0, self._n_verts)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glDisable(GL_BLEND)
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisable(GL_DEPTH_TEST)
+
+    def free(self):
+        if self._vbo is not None:
+            glDeleteBuffers(1, [self._vbo])
+            self._vbo = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Frame cache
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FrameCache:
-    MAX = 25   # frames kept in RAM
-
     def __init__(self, frames_dir: str):
-        self.dir    = Path(frames_dir)
-        self.paths: list = []
-        self._cache: dict = {}    # index → (verts, faces, normals, centre, scale)
+        self.dir   = Path(frames_dir)
+        self.paths = []
+        self.buf   = MeshBuffer()    # single GPU buffer, reloaded on frame change
+        self._loaded_idx = -1
         self.refresh()
 
     def refresh(self):
-        self.paths  = sorted(self.dir.glob("frame_*.stl"))
-        self._cache = {}
+        self.paths = sorted(self.dir.glob("frame_*.stl"))
+        self._loaded_idx = -1
 
     @property
-    def count(self) -> int:
+    def count(self):
         return len(self.paths)
 
-    def get(self, idx: int):
-        """Return (vertices, faces, normals, centre, fit_scale) or Nones."""
+    def ensure_loaded(self, idx: int):
         if not self.paths or not (0 <= idx < len(self.paths)):
-            return None, None, None, None, None
-        if idx not in self._cache:
-            if len(self._cache) >= self.MAX:
-                del self._cache[next(iter(self._cache))]
-            try:
-                m   = trimesh.load(str(self.paths[idx]), process=False, force='mesh')
-                v   = m.vertices.astype(np.float32)
-                f   = m.faces.astype(np.int32)
-                fn  = m.face_normals.astype(np.float32)
-                ctr = ((v.min(0) + v.max(0)) * 0.5).astype(np.float32)
-                ext = (v.max(0) - v.min(0)).max()
-                scl = float(20.0 / max(ext, 1e-6))   # fit to ~20-unit box
-                self._cache[idx] = (v, f, fn, ctr, scl)
-            except Exception as e:
-                print(f"[viewer] Frame {idx} load error: {e}")
-                return None, None, None, None, None
-        return self._cache[idx]
+            return False
+        if idx == self._loaded_idx:
+            return True
+        try:
+            self.buf.load(str(self.paths[idx]))
+            self._loaded_idx = idx
+            return True
+        except Exception as e:
+            print(f"[viewer] Frame {idx} load error: {e}")
+            return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Star field — background particle system
+# Star field — all 320 stars in 3 glDrawArrays calls (bucketed by size)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_STAR_PALETTES = [
-    (1.00, 1.00, 1.00), (0.78, 0.82, 1.00), (1.00, 0.94, 0.78),
-    (0.70, 0.78, 1.00), (1.00, 1.00, 0.86), (0.86, 0.72, 1.00),
+_STAR_COLS = [
+    (1.00, 1.00, 1.00), (0.78, 0.82, 1.00), (1.00, 0.93, 0.76),
+    (0.70, 0.78, 1.00), (1.00, 1.00, 0.84), (0.85, 0.70, 1.00),
 ]
 
-class _Star:
-    __slots__ = ("x", "y", "sz", "col", "phase", "freq", "depth")
+class StarField:
+    N      = 320
+    NBIG   = 28     # large stars
+    NMED   = 90     # medium stars
+    # rest = small
 
     def __init__(self):
-        self.x     = random.uniform(-1.05, 1.05)
-        self.y     = random.uniform(-1.05, 1.05)
-        self.sz    = random.uniform(0.6, 2.4)
-        self.col   = random.choice(_STAR_PALETTES)
-        self.phase = random.uniform(0, 6.28)
-        self.freq  = random.uniform(0.4, 3.5)
-        self.depth = random.uniform(0.3, 1.0)
+        self.t = 0.0
+        # Pre-generate star data
+        xs     = np.random.uniform(-1.05, 1.05, self.N).astype(np.float32)
+        ys     = np.random.uniform(-1.05, 1.05, self.N).astype(np.float32)
+        self._pos   = np.stack([xs, ys], axis=1)             # (N, 2)
+        self._cols  = np.array([random.choice(_STAR_COLS) for _ in range(self.N)],
+                                dtype=np.float32)             # (N, 3)
+        self._phase = np.random.uniform(0, 6.28, self.N).astype(np.float32)
+        self._freq  = np.random.uniform(0.4, 3.5, self.N).astype(np.float32)
+        # Sort by brightness tier so we can split indices
+        tiers = np.array([0]*self.NBIG + [1]*self.NMED +
+                         [2]*(self.N - self.NBIG - self.NMED))
+        np.random.shuffle(tiers)
+        self._tiers = tiers
+        # Comets
+        self._comets = [_Comet() for _ in range(4)]
 
-    def alpha(self, t):
-        return 0.45 + 0.55 * math.sin(self.phase + t * self.freq) ** 2
+    def update(self, dt: float):
+        self.t += dt
+        for c in self._comets:
+            c.update(dt)
+
+    def draw(self):
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)   # additive blend = glow
+
+        t  = self.t
+        # Per-star alpha based on twinkle
+        alpha = (0.45 + 0.55 * np.sin(self._phase + t * self._freq) ** 2
+                 ).astype(np.float32)           # (N,)
+        rgba  = np.hstack([self._cols,
+                           alpha[:, None]]).astype(np.float32)  # (N, 4)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+
+        for size, tier in [(2.8, 0), (1.7, 1), (1.0, 2)]:
+            mask = self._tiers == tier
+            if not mask.any():
+                continue
+            pos_t  = np.ascontiguousarray(self._pos[mask])
+            rgba_t = np.ascontiguousarray(rgba[mask])
+            glPointSize(size)
+            glVertexPointer(2, GL_FLOAT, 0, pos_t)
+            glColorPointer(4,  GL_FLOAT, 0, rgba_t)
+            glDrawArrays(GL_POINTS, 0, len(pos_t))
+
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        # Comets (few, drawn with immediate mode)
+        glEnable(GL_POINT_SMOOTH)
+        for c in self._comets:
+            if not c.active:
+                continue
+            fade = max(0.0, 1.0 - c.life / c.max_life)
+            r, g, b = c.col
+            for i in range(c.TRAIL):
+                frac  = i / c.TRAIL
+                alpha = (1.0 - frac) * fade * 0.9
+                sz    = (1.0 - frac) * 3.6
+                glColor4f(r, g, b, alpha)
+                glPointSize(max(0.4, sz))
+                glBegin(GL_POINTS)
+                glVertex2f(c.x - c.vx * frac * 0.09,
+                           c.y - c.vy * frac * 0.09)
+                glEnd()
+        glDisable(GL_POINT_SMOOTH)
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDisable(GL_BLEND)
 
 
 class _Comet:
-    _COLORS = [
-        (1.0, 0.40, 0.10),   # orange
-        (0.35, 0.55, 1.00),  # blue
-        (0.80, 0.28, 1.00),  # violet
-        (0.25, 1.00, 0.65),  # teal
-        (1.00, 0.90, 0.15),  # gold
-        (1.00, 1.00, 1.00),  # white
-        (1.00, 1.00, 1.00),  # white (higher chance)
-    ]
-    TRAIL = 28
+    TRAIL  = 26
+    _COLORS = [(1.,.4,.1),(.35,.55,1.),(.8,.28,1.),(.25,1.,.65),
+               (1.,.9,.15),(1.,1.,1.),(1.,1.,1.)]
 
     def __init__(self):
-        self.active  = False
-        self.timer   = 0.0
-        self.wait    = random.uniform(2.0, 9.0)
-        self.x = self.y = self.vx = self.vy = 0.0
-        self.life = self.max_life = 0.0
-        self.col = (1.0, 1.0, 1.0)
+        self.active = False
+        self.timer  = 0.0
+        self.wait   = random.uniform(2., 9.)
+        self.x = self.y = self.vx = self.vy = 0.
+        self.life = self.max_life = 0.
+        self.col = (1., 1., 1.)
 
     def spawn(self):
-        edge = random.randint(0, 3)
-        if   edge == 0: self.x, self.y = random.uniform(-1,1),  1.15
-        elif edge == 1: self.x, self.y = random.uniform(-1,1), -1.15
-        elif edge == 2: self.x, self.y = -1.15, random.uniform(-1,1)
-        else:           self.x, self.y =  1.15, random.uniform(-1,1)
-        ang  = math.atan2(-self.y, -self.x) + random.uniform(-0.45, 0.45)
-        spd  = random.uniform(0.35, 1.1)
-        self.vx, self.vy = math.cos(ang)*spd, math.sin(ang)*spd
-        self.life, self.max_life = 0.0, random.uniform(0.7, 1.8)
+        e = random.randint(0, 3)
+        if   e == 0: self.x, self.y =  random.uniform(-1,1),  1.15
+        elif e == 1: self.x, self.y =  random.uniform(-1,1), -1.15
+        elif e == 2: self.x, self.y = -1.15, random.uniform(-1,1)
+        else:        self.x, self.y =  1.15, random.uniform(-1,1)
+        a = math.atan2(-self.y, -self.x) + random.uniform(-0.45, 0.45)
+        s = random.uniform(0.35, 1.1)
+        self.vx, self.vy = math.cos(a)*s, math.sin(a)*s
+        self.life, self.max_life = 0., random.uniform(0.7, 1.8)
         self.col    = random.choice(self._COLORS)
         self.active = True
 
@@ -244,72 +392,15 @@ class _Comet:
         self.timer += dt
         if not self.active:
             if self.timer >= self.wait:
-                self.timer = 0.0
-                self.wait  = random.uniform(3.0, 12.0)
+                self.timer = 0.; self.wait = random.uniform(3., 12.)
                 self.spawn()
             return
         self.life += dt
-        self.x    += self.vx * dt
-        self.y    += self.vy * dt
+        self.x += self.vx * dt
+        self.y += self.vy * dt
         if abs(self.x) > 1.6 or abs(self.y) > 1.6 or self.life > self.max_life:
             self.active = False
-            self.timer  = 0.0
-            self.wait   = random.uniform(2.0, 9.0)
-
-
-class StarField:
-    N = 320
-
-    def __init__(self):
-        self.stars  = [_Star() for _ in range(self.N)]
-        self.comets = [_Comet() for _ in range(4)]
-        self.t      = 0.0
-
-    def update(self, dt):
-        self.t += dt
-        for c in self.comets:
-            c.update(dt)
-
-    def draw(self):
-        """Draw in a [-1,+1]×[-1,+1] orthographic coordinate system."""
-        glDisable(GL_DEPTH_TEST)
-        glDisable(GL_LIGHTING)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE)   # additive — looks great
-        glEnable(GL_POINT_SMOOTH)
-
-        t = self.t
-        # ── stars ──
-        for s in self.stars:
-            a = s.alpha(t)
-            r, g, b = s.col
-            glColor4f(r, g, b, a)
-            glPointSize(s.sz * (0.7 + 0.3 * a))
-            glBegin(GL_POINTS)
-            glVertex2f(s.x, s.y)
-            glEnd()
-
-        # ── comets ──
-        for c in self.comets:
-            if not c.active:
-                continue
-            fade = max(0.0, 1.0 - c.life / c.max_life)
-            r, g, b = c.col
-            for i in range(c.TRAIL):
-                frac  = i / c.TRAIL
-                alpha = (1.0 - frac) * fade * 0.92
-                sz    = (1.0 - frac) * 3.8
-                tx    = c.x - c.vx * frac * 0.09
-                ty    = c.y - c.vy * frac * 0.09
-                glColor4f(r, g, b, alpha)
-                glPointSize(max(0.4, sz))
-                glBegin(GL_POINTS)
-                glVertex2f(tx, ty)
-                glEnd()
-
-        glDisable(GL_POINT_SMOOTH)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glDisable(GL_BLEND)
+            self.timer  = 0.; self.wait = random.uniform(2., 9.)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,152 +409,83 @@ class StarField:
 
 class Camera:
     def __init__(self):
-        self.rot_x     =  18.0
-        self.rot_y     = -25.0
-        self.zoom      =   1.0
-        self.pan_x     =   0.0
-        self.pan_y     =   0.0
-        self._start    =  None
-        self._mode     =  None   # 'rotate' | 'pan'
+        self.rx, self.ry = 18., -25.
+        self.zoom        = 1.0
+        self.px, self.py = 0., 0.
+        self._p, self._mode = None, None
 
     def press(self, x, y, ctrl):
-        self._start = (x, y)
-        self._mode  = 'pan' if ctrl else 'rotate'
+        self._p    = (x, y)
+        self._mode = 'pan' if ctrl else 'rot'
 
     def drag(self, x, y):
-        if self._start is None:
+        if not self._p:
             return
-        dx, dy     = x - self._start[0], y - self._start[1]
-        self._start = (x, y)
-        if self._mode == 'rotate':
-            self.rot_y += dx * 0.40
-            self.rot_x += dy * 0.40
+        dx, dy = x - self._p[0], y - self._p[1]
+        self._p = (x, y)
+        if self._mode == 'rot':
+            self.ry += dx * 0.40; self.rx += dy * 0.40
         else:
-            self.pan_x += dx * 0.025 / self.zoom
-            self.pan_y -= dy * 0.025 / self.zoom
+            self.px += dx * 0.025 / self.zoom
+            self.py -= dy * 0.025 / self.zoom
 
-    def release(self):
-        self._start = None
+    def release(self):     self._p = None
+    def scroll(self, d):   self.zoom = max(.08, min(12., self.zoom * (1.12 if d>0 else .89)))
 
-    def scroll(self, direction):
-        self.zoom = max(0.08, min(12.0, self.zoom * (1.12 if direction > 0 else 0.89)))
-
-    def apply_gl(self):
+    def apply(self):
         glScalef(self.zoom, self.zoom, self.zoom)
-        glTranslatef(self.pan_x, self.pan_y, 0.0)
-        glRotatef(self.rot_x, 1, 0, 0)
-        glRotatef(self.rot_y, 0, 1, 0)
+        glTranslatef(self.px, self.py, 0.)
+        glRotatef(self.rx, 1, 0, 0)
+        glRotatef(self.ry, 0, 1, 0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # OpenGL helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _gl_setup_lighting():
-    glEnable(GL_LIGHTING)
-    glEnable(GL_LIGHT0)
-    glEnable(GL_LIGHT1)
-    glLightfv(GL_LIGHT0, GL_POSITION, (2.0,  3.0,  3.5,  0.0))
-    glLightfv(GL_LIGHT0, GL_DIFFUSE,  (0.88, 0.88, 0.92, 1.0))
-    glLightfv(GL_LIGHT0, GL_SPECULAR, (0.55, 0.55, 0.65, 1.0))
-    glLightfv(GL_LIGHT0, GL_AMBIENT,  (0.0,  0.0,  0.0,  1.0))
-    glLightfv(GL_LIGHT1, GL_POSITION, (-1.5, -1.5,  1.0, 0.0))
-    glLightfv(GL_LIGHT1, GL_DIFFUSE,  (0.28, 0.28, 0.34, 1.0))
-    glLightfv(GL_LIGHT1, GL_AMBIENT,  (0.10, 0.10, 0.13, 1.0))
+def setup_lighting():
+    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_LIGHT1)
+    glLightfv(GL_LIGHT0, GL_POSITION, (2., 3., 3.5, 0.))
+    glLightfv(GL_LIGHT0, GL_DIFFUSE,  (.88,.88,.92,1.))
+    glLightfv(GL_LIGHT0, GL_SPECULAR, (.55,.55,.65,1.))
+    glLightfv(GL_LIGHT0, GL_AMBIENT,  (0., 0., 0., 1.))
+    glLightfv(GL_LIGHT1, GL_POSITION, (-1.5,-1.5,1.,0.))
+    glLightfv(GL_LIGHT1, GL_DIFFUSE,  (.28,.28,.34,1.))
+    glLightfv(GL_LIGHT1, GL_AMBIENT,  (.10,.10,.13,1.))
     glEnable(GL_COLOR_MATERIAL)
     glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
     glShadeModel(GL_FLAT)
 
 
-def _draw_stent(verts, faces, normals, preview=False, scale_preview=1.0):
-    if verts is None:
-        return
-    glEnable(GL_DEPTH_TEST)
-    glEnable(GL_LIGHTING)
-
-    # Apply preview scale (radial approximation of diameter change)
-    if abs(scale_preview - 1.0) > 0.001:
-        glPushMatrix()
-        glScalef(scale_preview, scale_preview, 1.0)  # radial only
-
-    if preview:
-        glColor4f(1.0, 0.88, 0.35, 0.90)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (0.5, 0.45, 0.2, 1.0))
-    else:
-        glColor4f(0.93, 0.93, 1.00, 1.00)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (0.45, 0.45, 0.55, 1.0))
-    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 44.0)
-
-    # Filled faces
-    glBegin(GL_TRIANGLES)
-    for i, face in enumerate(faces):
-        n = normals[i]
-        glNormal3f(float(n[0]), float(n[1]), float(n[2]))
-        for vi in face:
-            v = verts[vi]
-            glVertex3f(float(v[0]), float(v[1]), float(v[2]))
-    glEnd()
-
-    # Subtle wireframe overlay
-    glDisable(GL_LIGHTING)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-    glLineWidth(0.5)
-    glColor4f(0.35, 0.40, 0.65, 0.22)
-    glBegin(GL_TRIANGLES)
-    for face in faces:
-        for vi in face:
-            v = verts[vi]
-            glVertex3f(float(v[0]), float(v[1]), float(v[2]))
-    glEnd()
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-    glDisable(GL_BLEND)
-    glEnable(GL_LIGHTING)
-
-    if abs(scale_preview - 1.0) > 0.001:
-        glPopMatrix()
-
-    glDisable(GL_DEPTH_TEST)
-
-
-def _surface_to_texture(surface: pygame.Surface) -> int:
-    data   = pygame.image.tostring(surface, "RGBA", True)
-    w, h   = surface.get_size()
-    tex    = int(glGenTextures(1))
-    glBindTexture(GL_TEXTURE_2D, tex)
+def surface_to_tex(surf: pygame.Surface) -> int:
+    data = pygame.image.tostring(surf, "RGBA", True)
+    w, h = surf.get_size()
+    t    = int(glGenTextures(1))
+    glBindTexture(GL_TEXTURE_2D, t)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
-    return tex
+    return t
 
 
-def _draw_panel_texture(tex, view_w, win_w, win_h):
-    """Blit panel texture over the right portion of the screen."""
+def draw_panel_tex(tex, view_w, win_w, win_h):
     glViewport(0, 0, win_w, win_h)
     glMatrixMode(GL_PROJECTION); glLoadIdentity()
     glOrtho(0, win_w, 0, win_h, -1, 1)
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity()
-
-    glEnable(GL_TEXTURE_2D)
-    glEnable(GL_BLEND)
+    glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
+    glEnable(GL_TEXTURE_2D); glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glDisable(GL_LIGHTING)
-    glDisable(GL_DEPTH_TEST)
     glBindTexture(GL_TEXTURE_2D, tex)
     glColor4f(1, 1, 1, 1)
-
-    x1, x2 = float(view_w), float(win_w)
-    y1, y2 = 0.0, float(win_h)
+    x1, x2, y1, y2 = float(view_w), float(win_w), 0., float(win_h)
     glBegin(GL_QUADS)
-    glTexCoord2f(0, 0); glVertex2f(x1, y1)
-    glTexCoord2f(1, 0); glVertex2f(x2, y1)
-    glTexCoord2f(1, 1); glVertex2f(x2, y2)
-    glTexCoord2f(0, 1); glVertex2f(x1, y2)
+    glTexCoord2f(0,0); glVertex2f(x1,y1)
+    glTexCoord2f(1,0); glVertex2f(x2,y1)
+    glTexCoord2f(1,1); glVertex2f(x2,y2)
+    glTexCoord2f(0,1); glVertex2f(x1,y2)
     glEnd()
-
-    glDisable(GL_TEXTURE_2D)
-    glDisable(GL_BLEND)
+    glDisable(GL_TEXTURE_2D); glDisable(GL_BLEND)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -471,293 +493,243 @@ def _draw_panel_texture(tex, view_w, win_w, win_h):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Slider:
-    BAR_H   = 8
-    KNOB_R  = 9
-    LABEL_H = 17
+    BAR_H  = 8
+    KNOB_R = 9
+    LBL_H  = 17
 
-    def __init__(self, key, label, lo, hi, step, fmt, rect: pygame.Rect):
-        self.key      = key
-        self.label    = label
+    def __init__(self, key, label, lo, hi, step, fmt, rect):
+        self.key, self.label  = key, label
         self.lo, self.hi, self.step = lo, hi, step
-        self.fmt      = fmt
-        self.rect     = rect        # full row rect in panel-local coords
+        self.fmt, self.rect   = fmt, rect
         self.dragging = False
         self.editing  = False
         self.edit_buf = ""
 
     @property
-    def bar_rect(self) -> pygame.Rect:
+    def bar(self):
         r = self.rect
-        y = r.y + self.LABEL_H + (r.h - self.LABEL_H - self.BAR_H) // 2
+        y = r.y + self.LBL_H + (r.h - self.LBL_H - self.BAR_H) // 2
         return pygame.Rect(r.x, y, r.w, self.BAR_H)
 
-    def val_to_x(self, val) -> float:
-        br = self.bar_rect
-        t  = (val - self.lo) / (self.hi - self.lo)
-        return br.x + t * br.w
+    def val_x(self, v):
+        br = self.bar
+        return br.x + (v - self.lo) / (self.hi - self.lo) * br.w
 
-    def x_to_val(self, x) -> float:
-        br  = self.bar_rect
-        t   = max(0.0, min(1.0, (x - br.x) / br.w))
+    def x_val(self, x):
+        br  = self.bar
+        t   = max(0., min(1., (x - br.x) / br.w))
         raw = self.lo + t * (self.hi - self.lo)
         return max(self.lo, min(self.hi, round(raw / self.step) * self.step))
 
-    def knob_hit(self, mx, my, val) -> bool:
-        kx = self.val_to_x(val)
-        ky = self.bar_rect.centery
-        return (mx - kx) ** 2 + (my - ky) ** 2 <= (self.KNOB_R + 4) ** 2
+    def knob_hit(self, mx, my, v):
+        kx, ky = self.val_x(v), self.bar.centery
+        return (mx-kx)**2 + (my-ky)**2 <= (self.KNOB_R+5)**2
 
-    def bar_hit(self, mx, my) -> bool:
-        br = self.bar_rect
-        return br.inflate(0, 10).collidepoint(mx, my)
+    def bar_hit(self, mx, my):
+        return self.bar.inflate(0, 12).collidepoint(mx, my)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI Panel (rendered to a pygame Surface, uploaded as GL texture each frame)
+# UI Panel — dirty-flag rendering (re-draws Surface only when state changes)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class UIPanel:
-    PAD    = 14
-    ROW_H  = 50     # height of one slider row
-    BTN_H  = 40
-    SEP    = 10
+    PAD   = 14
+    ROW_H = 50
+    BTN_H = 40
 
     def __init__(self, w, h, settings, frame_cache):
-        self.w = w
-        self.h = h
-        self.committed  = copy.deepcopy(settings)
-        self.preview    = copy.deepcopy(settings)
-        self.frame_cache = frame_cache
-        self.cur_frame   = 0
-        self.dirty       = False     # preview ≠ committed
-        self.sim_running = False
-        self.status_msg  = ""
-        self.status_col  = C_TEXT_DIM
-        self.hover       = None
+        self.w, self.h        = w, h
+        self.committed        = copy.deepcopy(settings)
+        self.preview          = copy.deepcopy(settings)
+        self.frame_cache      = frame_cache
+        self.cur_frame        = 0
+        self.dirty            = False   # preview ≠ committed
+        self.sim_running      = False
+        self.status_msg       = ""
+        self.status_col       = C_TEXT_DIM
+        self.hover            = None
+        self.needs_redraw     = True    # panel Surface needs re-render
+        self.sliders: list    = []
+        self._fnt_lg = self._fnt_md = self._fnt_sm = None
+        self._layout_ready    = False
 
-        self._fonts_ok   = False
-        self._font_lg = self._font_md = self._font_sm = None
-        self.sliders: list[Slider] = []
-        self._layout_done = False
-
-    # ── lazy font & layout init (called after pygame.init) ────────────────────
-
-    def _ensure_init(self):
-        if self._layout_done:
-            return
+    def init_fonts_and_layout(self):
         try:
-            self._font_lg = pygame.font.SysFont("Segoe UI",  17, bold=True)
-            self._font_md = pygame.font.SysFont("Segoe UI",  14)
-            self._font_sm = pygame.font.SysFont("Segoe UI",  13)
+            self._fnt_lg = pygame.font.SysFont("Segoe UI", 17, bold=True)
+            self._fnt_md = pygame.font.SysFont("Segoe UI", 14)
+            self._fnt_sm = pygame.font.SysFont("Segoe UI", 13)
         except Exception:
-            self._font_lg = pygame.font.SysFont(None, 19, bold=True)
-            self._font_md = pygame.font.SysFont(None, 16)
-            self._font_sm = pygame.font.SysFont(None, 14)
-        self._build_layout()
-        self._layout_done = True
+            self._fnt_lg = pygame.font.SysFont(None, 19, bold=True)
+            self._fnt_md = pygame.font.SysFont(None, 16)
+            self._fnt_sm = pygame.font.SysFont(None, 14)
 
-    def _build_layout(self):
-        PAD, ROW_H, BTN_H, SEP = self.PAD, self.ROW_H, self.BTN_H, self.SEP
-        w = self.w - 2 * PAD
+        PAD, ROW_H, BTN_H = self.PAD, self.ROW_H, self.BTN_H
+        w = self.w - 2*PAD
         y = PAD
 
-        self._title_y = y;          y += 22
-        self._banner_y = y;         y += 18   # preview banner
-
-        y += SEP
-        # Frame nav
+        self._title_y  = y;  y += 22
+        self._banner_y = y;  y += 18 + 8
         nb = 44
-        self._prev_btn  = pygame.Rect(PAD,          y, nb, BTN_H)
-        self._next_btn  = pygame.Rect(PAD + nb + 4, y, nb, BTN_H)
-        self._frame_lbl = pygame.Rect(PAD + nb*2+10, y, w - nb*2 - 10, BTN_H)
-        y += BTN_H + SEP
+        self._prev_btn = pygame.Rect(PAD,          y, nb, BTN_H)
+        self._next_btn = pygame.Rect(PAD+nb+4,     y, nb, BTN_H)
+        self._frame_lr = pygame.Rect(PAD+nb*2+10,  y, w-nb*2-10, BTN_H)
+        y += BTN_H + 10
+        self._sep1 = y;  y += 12
+        self._ph_y = y;  y += 22
 
-        # Separator
-        self._sep1 = y;             y += SEP + 2
-
-        # Params header
-        self._ph_y = y;             y += 20 + 4
-
-        # Sliders
         self.sliders = []
         for key, label, lo, hi, step, fmt in PARAM_SPECS:
             rect = pygame.Rect(PAD, y, w, ROW_H)
             self.sliders.append(Slider(key, label, lo, hi, step, fmt, rect))
             y += ROW_H + 6
 
-        # Separator
-        self._sep2 = y;             y += SEP + 2
+        self._sep2 = y;  y += 12
+        half = (w-6)//2
+        self._regen_btn = pygame.Rect(PAD,        y, half, BTN_H)
+        self._save_btn  = pygame.Rect(PAD+half+6, y, half, BTN_H)
+        y += BTN_H + 8
+        self._status_y  = y
+        self._layout_ready = True
 
-        # Buttons
-        half = (w - 6) // 2
-        self._regen_btn = pygame.Rect(PAD,          y, half, BTN_H)
-        self._save_btn  = pygame.Rect(PAD+half+6,   y, half, BTN_H)
-        y += BTN_H + SEP
-
-        # Status
-        self._status_y = y
-
-    # ── rendering ─────────────────────────────────────────────────────────────
+    # ── render ────────────────────────────────────────────────────────────────
 
     def render(self) -> pygame.Surface:
-        self._ensure_init()
         surf = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
-
-        bg = (*C_DIRTY_BG, 235) if self.dirty else (*C_PANEL, 240)
+        bg   = (*C_DIRTY_BG, 240) if self.dirty else (*C_PANEL, 245)
         surf.fill(bg)
-        pygame.draw.line(surf, C_PANEL_EDGE, (0, 0), (0, self.h), 2)
+        pygame.draw.line(surf, C_PANEL_EDGE, (0,0), (0,self.h), 2)
 
-        # Title
-        self._txt(surf, self._font_lg, "Stent FEA Viewer", C_ACCENT,
-                  self.PAD, self._title_y)
+        T = self._txt
 
-        # Preview banner
+        T(surf, self._fnt_lg, "Stent FEA Viewer", C_ACCENT, self.PAD, self._title_y)
         if self.dirty:
-            self._txt(surf, self._font_sm, "  PREVIEW — uncommitted changes",
-                      C_PREVIEW, self.PAD, self._banner_y)
+            T(surf, self._fnt_sm, "  PREVIEW — uncommitted changes", C_PREVIEW,
+              self.PAD, self._banner_y)
         else:
-            self._txt(surf, self._font_sm, "  Settings committed",
-                      C_TEXT_DIM, self.PAD, self._banner_y)
+            T(surf, self._fnt_sm, "  Settings committed", C_TEXT_DIM,
+              self.PAD, self._banner_y)
 
-        # Separator
         pygame.draw.line(surf, C_PANEL_EDGE,
-                         (self.PAD, self._sep1), (self.w - self.PAD, self._sep1), 1)
+                         (self.PAD, self._sep1), (self.w-self.PAD, self._sep1), 1)
 
-        # Frame navigator
         n = max(1, self.frame_cache.count)
-        self._btn(surf, self._prev_btn,  "<",    C_BTN_FRAME, C_BTN_FRAME_H, "prev")
-        self._btn(surf, self._next_btn,  ">",    C_BTN_FRAME, C_BTN_FRAME_H, "next")
-        label = f"Frame  {self.cur_frame + 1}  /  {n}"
-        lt = self._font_md.render(label, True, C_TEXT)
-        surf.blit(lt, (self._frame_lbl.x + 6,
-                       self._frame_lbl.y + (self.BTN_H - lt.get_height()) // 2))
+        self._btn(surf, self._prev_btn, "<", C_BTN_FRAME, C_BTN_FRAMEH, "prev")
+        self._btn(surf, self._next_btn, ">", C_BTN_FRAME, C_BTN_FRAMEH, "next")
+        lbl = self._fnt_md.render(f"Frame  {self.cur_frame+1}  /  {n}", True, C_TEXT)
+        surf.blit(lbl, (self._frame_lr.x+6,
+                        self._frame_lr.y + (self.BTN_H - lbl.get_height())//2))
 
-        # Params header
-        self._txt(surf, self._font_md, "Simulation Parameters", C_TEXT,
-                  self.PAD, self._ph_y)
+        T(surf, self._fnt_md, "Simulation Parameters", C_TEXT, self.PAD, self._ph_y)
 
-        # Sliders
         for sl in self.sliders:
             self._draw_slider(surf, sl, self.preview.get(sl.key, sl.lo))
 
-        # Separator
         pygame.draw.line(surf, C_PANEL_EDGE,
-                         (self.PAD, self._sep2), (self.w - self.PAD, self._sep2), 1)
+                         (self.PAD, self._sep2), (self.w-self.PAD, self._sep2), 1)
 
-        # Buttons
-        rlbl = "Regenerating..." if self.sim_running else "Regenerate"
-        self._btn(surf, self._regen_btn, rlbl,
-                  C_BTN_REGEN, C_BTN_REGEN_H, "regen", self.sim_running)
-        self._btn(surf, self._save_btn,  "Save Settings",
-                  C_BTN_SAVE,  C_BTN_SAVE_H,  "save")
+        rl = "Regenerating..." if self.sim_running else "Regenerate"
+        self._btn(surf, self._regen_btn, rl,  C_BTN_REGEN, C_BTN_RGENH,
+                  "regen", self.sim_running)
+        self._btn(surf, self._save_btn, "Save Settings", C_BTN_SAVE, C_BTN_SAVEH, "save")
 
-        # Status
         if self.status_msg:
-            self._txt(surf, self._font_sm, self.status_msg,
-                      self.status_col, self.PAD, self._status_y)
+            T(surf, self._fnt_sm, self.status_msg, self.status_col,
+              self.PAD, self._status_y)
 
+        self.needs_redraw = False
         return surf
 
-    def _txt(self, surf, font, text, color, x, y):
-        t = font.render(text, True, color)
-        surf.blit(t, (x, y))
+    def _txt(self, s, f, t, c, x, y):
+        s.blit(f.render(t, True, c), (x, y))
 
-    def _btn(self, surf, rect, label, col, col_h, name, disabled=False):
-        c = tuple(max(0, v - 25) for v in col) if disabled \
-            else (col_h if self.hover == name else col)
+    def _btn(self, surf, rect, label, col, colh, name, disabled=False):
+        c = tuple(max(0,v-25) for v in col) if disabled \
+            else (colh if self.hover==name else col)
         pygame.draw.rect(surf, c, rect, border_radius=6)
         pygame.draw.rect(surf, C_PANEL_EDGE, rect, 1, border_radius=6)
-        tc = C_TEXT_DIM if disabled else C_TEXT
-        t  = self._font_sm.render(label, True, tc)
-        surf.blit(t, (rect.x + (rect.w - t.get_width()) // 2,
-                      rect.y + (rect.h - t.get_height()) // 2))
+        t = self._fnt_sm.render(label, True, C_TEXT_DIM if disabled else C_TEXT)
+        surf.blit(t, (rect.x+(rect.w-t.get_width())//2,
+                      rect.y+(rect.h-t.get_height())//2))
 
-    def _draw_slider(self, surf, sl: Slider, val):
-        r  = sl.rect
-        br = sl.bar_rect
-
-        # Label (left) + value (right)
-        self._txt(surf, self._font_sm, sl.label, C_TEXT_DIM, r.x, r.y)
+    def _draw_slider(self, surf, sl, val):
+        r, br = sl.rect, sl.bar
+        self._txt(surf, self._fnt_sm, sl.label, C_TEXT_DIM, r.x, r.y)
         if sl.editing:
-            vs, vc = sl.edit_buf + "|", C_PREVIEW
+            vs, vc = sl.edit_buf+"|", C_PREVIEW
         else:
             vs, vc = sl.fmt.format(val), C_ACCENT
-        vt = self._font_sm.render(vs, True, vc)
-        surf.blit(vt, (r.right - vt.get_width(), r.y))
+        vt = self._fnt_sm.render(vs, True, vc)
+        surf.blit(vt, (r.right-vt.get_width(), r.y))
 
-        # Track
         pygame.draw.rect(surf, C_SLIDER_BG, br, border_radius=4)
-        t     = (val - sl.lo) / (sl.hi - sl.lo)
-        fw    = max(0, int(t * br.w))
+        t  = (val-sl.lo)/(sl.hi-sl.lo)
+        fw = max(0, int(t*br.w))
         if fw:
             pygame.draw.rect(surf, C_SLIDER_FG,
                              pygame.Rect(br.x, br.y, fw, br.h), border_radius=4)
-
-        # Knob
-        kx = int(br.x + t * br.w)
-        ky = br.centery
+        kx, ky = int(sl.val_x(val)), br.centery
         pygame.draw.circle(surf, C_KNOB,   (kx, ky), sl.KNOB_R)
         pygame.draw.circle(surf, C_ACCENT, (kx, ky), sl.KNOB_R, 2)
 
-    # ── event handling (mx, my in panel-local coords) ────────────────────────
+    # ── events ────────────────────────────────────────────────────────────────
 
     def handle(self, event, offset_x: int) -> bool:
-        """Returns True if event was consumed."""
-        self._ensure_init()
+        if not self._layout_ready:
+            return False
 
-        def local(pos):
-            return pos[0] - offset_x, pos[1]
+        lx = lambda pos: (pos[0]-offset_x, pos[1])
 
         if event.type == MOUSEMOTION:
-            mx, my = local(event.pos)
-            self.hover = self._hit(mx, my)
+            mx, my = lx(event.pos)
+            old_h  = self.hover
+            self.hover = self._hittest(mx, my)
+            if old_h != self.hover:
+                self.needs_redraw = True
             for sl in self.sliders:
                 if sl.dragging:
-                    self.preview[sl.key] = sl.x_to_val(mx)
-                    self.dirty = True
+                    new_v = sl.x_val(mx)
+                    if new_v != self.preview.get(sl.key):
+                        self.preview[sl.key] = new_v
+                        self.dirty = True
+                        self.needs_redraw = True
             return False
 
         if event.type == MOUSEBUTTONDOWN:
-            mx, my = local(event.pos)
+            mx, my = lx(event.pos)
 
-            # Right-click on value text → enter edit mode
-            if event.button == 3:
-                vt_w = 60   # approximate value text width
+            if event.button == 3:   # right-click → text edit
                 for sl in self.sliders:
-                    if pygame.Rect(sl.rect.right - vt_w, sl.rect.y,
-                                   vt_w, sl.Slider.LABEL_H if hasattr(sl, 'Slider') else Slider.LABEL_H
-                                   ).collidepoint(mx, my):
+                    if sl.rect.collidepoint(mx, my):
                         sl.editing  = True
                         sl.edit_buf = sl.fmt.format(self.preview.get(sl.key, sl.lo))
-                        return True
-                # Simplified: right-click anywhere on label row
-                for sl in self.sliders:
-                    if sl.rect.collidepoint(mx, my) and not sl.bar_hit(mx, my):
-                        sl.editing  = True
-                        sl.edit_buf = sl.fmt.format(self.preview.get(sl.key, sl.lo))
+                        self.needs_redraw = True
                         return True
 
             if event.button == 1:
-                # Sliders
                 for sl in self.sliders:
-                    if sl.knob_hit(mx, my, self.preview.get(sl.key, sl.lo)):
-                        sl.dragging = True;  return True
-                    if sl.bar_hit(mx, my):
+                    v = self.preview.get(sl.key, sl.lo)
+                    if sl.knob_hit(mx, my, v) or sl.bar_hit(mx, my):
                         sl.dragging = True
-                        self.preview[sl.key] = sl.x_to_val(mx)
-                        self.dirty = True;   return True
-                # Frame nav
+                        new_v = sl.x_val(mx)
+                        if new_v != v:
+                            self.preview[sl.key] = new_v
+                            self.dirty = True
+                            self.needs_redraw = True
+                        return True
                 if self._prev_btn.collidepoint(mx, my):
-                    self.cur_frame = max(0, self.cur_frame - 1);  return True
+                    self.cur_frame = max(0, self.cur_frame-1)
+                    self.needs_redraw = True;  return True
                 if self._next_btn.collidepoint(mx, my):
-                    self.cur_frame = min(self.frame_cache.count-1,
-                                        self.cur_frame + 1);      return True
+                    self.cur_frame = min(self.frame_cache.count-1, self.cur_frame+1)
+                    self.needs_redraw = True;  return True
                 if self._regen_btn.collidepoint(mx, my) and not self.sim_running:
-                    self._start_regen();                           return True
+                    self._start_regen();        return True
                 if self._save_btn.collidepoint(mx, my):
                     save_settings(self.committed)
                     self.status_msg = "Settings saved."
-                    self.status_col = C_OK;                        return True
+                    self.status_col = C_OK
+                    self.needs_redraw = True;  return True
             return False
 
         if event.type == MOUSEBUTTONUP and event.button == 1:
@@ -776,43 +748,43 @@ class UIPanel:
                         except ValueError:
                             pass
                         sl.editing = False
-                    elif event.key == K_ESCAPE:
-                        sl.editing = False
                     elif event.key == K_BACKSPACE:
                         sl.edit_buf = sl.edit_buf[:-1]
+                    elif event.key == K_ESCAPE:
+                        sl.editing = False
                     elif event.unicode in "0123456789.-":
                         sl.edit_buf += event.unicode
+                    self.needs_redraw = True
                     return True
         return False
 
-    def _hit(self, mx, my) -> str:
-        for name, rect in [("prev",  self._prev_btn),
-                            ("next",  self._next_btn),
-                            ("regen", self._regen_btn),
-                            ("save",  self._save_btn)]:
-            if rect.collidepoint(mx, my):
-                return name
+    def _hittest(self, mx, my):
+        for n, r in [("prev",self._prev_btn),("next",self._next_btn),
+                     ("regen",self._regen_btn),("save",self._save_btn)]:
+            if r.collidepoint(mx, my):
+                return n
         return None
 
-    # ── simulation runner ────────────────────────────────────────────────────
+    # ── simulation ────────────────────────────────────────────────────────────
 
     def _start_regen(self):
-        self.committed    = copy.deepcopy(self.preview)
-        self.dirty        = False
-        self.sim_running  = True
-        self.status_msg   = "Simulation running..."
-        self.status_col   = C_ACCENT
+        self.committed   = copy.deepcopy(self.preview)
+        self.dirty       = False
+        self.sim_running = True
+        self.status_msg  = "Simulation running..."
+        self.status_col  = C_ACCENT
+        self.needs_redraw = True
         threading.Thread(target=self._regen_worker, daemon=True).start()
 
     def _regen_worker(self):
         s    = self.committed
         base = Path(__file__).parent
         cmd  = [
-            sys.executable, str(base / "simulate.py"),
-            "--input",             str(base / s["input"]),
+            sys.executable, str(base/"simulate.py"),
+            "--input",             str(base/s["input"]),
             "--crimp-diameter",    str(s["crimp_diameter"]),
             "--deployed-diameter", str(s["deployed_diameter"]),
-            "--output-dir",        str(base / s["output_dir"]),
+            "--output-dir",        str(base/s["output_dir"]),
             "--n-crimp-steps",     str(int(s["n_crimp_steps"])),
             "--n-deploy-steps",    str(int(s["n_deploy_steps"])),
             "--transition-length", str(s["transition_length"]),
@@ -820,15 +792,16 @@ class UIPanel:
             "--crown-dwell",       str(s["crown_dwell"]),
             "--expansion-exponent",str(s["expansion_exponent"]),
             "--tine-flare",        str(s["tine_flare"]),
+            "--no-viewer",         # prevent simulate.py from spawning a new window
         ]
         try:
             r = subprocess.run(cmd, cwd=str(base),
                                capture_output=True, text=True, timeout=600)
             if r.returncode == 0:
                 self.frame_cache.refresh()
-                self.cur_frame   = 0
-                self.status_msg  = f"Done  —  {self.frame_cache.count} frames."
-                self.status_col  = C_OK
+                self.cur_frame    = 0
+                self.status_msg   = f"Done — {self.frame_cache.count} frames."
+                self.status_col   = C_OK
             else:
                 self.status_msg = "Simulation failed — see console."
                 self.status_col = C_ERR
@@ -837,87 +810,76 @@ class UIPanel:
             self.status_msg = f"Error: {e}"
             self.status_col = C_ERR
         finally:
-            self.sim_running = False
+            self.sim_running  = False
+            self.needs_redraw = True
 
-    # ── preview scale helper ─────────────────────────────────────────────────
+    # ── diameter preview scale ────────────────────────────────────────────────
 
     @property
-    def preview_scale(self) -> float:
-        """Radial scale to approximate the diameter change in preview mode."""
+    def preview_xy_scale(self) -> float:
         if not self.dirty:
             return 1.0
-        c_d = self.committed.get("deployed_diameter", 28.0)
-        p_d = self.preview.get("deployed_diameter", 28.0)
-        if c_d <= 0:
-            return 1.0
-        return p_d / c_d
+        cd = self.committed.get("deployed_diameter", 28.)
+        pd = self.preview.get("deployed_diameter", 28.)
+        return pd / cd if cd > 0 else 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Main loop
+# Main
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main(frames_dir: str = "./frames"):
     pygame.init()
     pygame.display.set_caption("Stent FEA Viewer")
-    screen = pygame.display.set_mode((WIN_W, WIN_H), DOUBLEBUF | OPENGL)
+    pygame.display.set_mode((WIN_W, WIN_H), DOUBLEBUF | OPENGL)
 
-    # Global GL state
-    glClearColor(*[c / 255.0 for c in C_BG], 1.0)
+    glClearColor(*[c/255. for c in C_BG], 1.)
     glEnable(GL_NORMALIZE)
-    _gl_setup_lighting()
+    setup_lighting()
 
-    # Core objects
+    renderer = glGetString(GL_RENDERER).decode()
+    print(f"[viewer] GPU: {renderer}")
+
     settings    = load_settings()
     frame_cache = FrameCache(frames_dir)
     starfield   = StarField()
     camera      = Camera()
     panel       = UIPanel(PANEL_W, WIN_H, settings, frame_cache)
-    panel._ensure_init()
+    panel.init_fonts_and_layout()
 
     panel_tex   = None
     clock       = pygame.time.Clock()
     t_prev      = time.time()
+    _loaded_f   = -1    # track which frame is in the VBO
 
     while True:
-        now = time.time()
-        dt  = min(now - t_prev, 0.05)
+        now   = time.time()
+        dt    = min(now - t_prev, 0.05)
         t_prev = now
+        ctrl  = bool(pygame.key.get_mods() & KMOD_CTRL)
 
-        ctrl = bool(pygame.key.get_mods() & KMOD_CTRL)
-
-        # ── event loop ────────────────────────────────────────────────────────
+        # ── events ────────────────────────────────────────────────────────────
         for ev in pygame.event.get():
             if ev.type == QUIT:
-                _cleanup(panel_tex); pygame.quit(); return
-
+                _quit(panel_tex, frame_cache); return
             if ev.type == KEYDOWN:
                 if ev.key == K_ESCAPE:
-                    _cleanup(panel_tex); pygame.quit(); return
+                    _quit(panel_tex, frame_cache); return
                 if ev.key == K_LEFT:
-                    panel.cur_frame = max(0, panel.cur_frame - 1)
+                    panel.cur_frame = max(0, panel.cur_frame-1)
+                    panel.needs_redraw = True
                 if ev.key == K_RIGHT:
-                    panel.cur_frame = min(frame_cache.count - 1,
-                                         panel.cur_frame + 1)
+                    panel.cur_frame = min(frame_cache.count-1, panel.cur_frame+1)
+                    panel.needs_redraw = True
                 panel.handle(ev, VIEW_W)
-
             elif ev.type == MOUSEBUTTONDOWN:
-                mx = ev.pos[0]
-                if mx < VIEW_W:
-                    camera.press(ev.pos[0], ev.pos[1], ctrl)
-                else:
-                    panel.handle(ev, VIEW_W)
-
+                if ev.pos[0] < VIEW_W:  camera.press(ev.pos[0], ev.pos[1], ctrl)
+                else:                   panel.handle(ev, VIEW_W)
             elif ev.type == MOUSEBUTTONUP:
-                camera.release()
-                panel.handle(ev, VIEW_W)
-
+                camera.release(); panel.handle(ev, VIEW_W)
             elif ev.type == MOUSEMOTION:
-                if ev.pos[0] < VIEW_W:
-                    camera.drag(ev.pos[0], ev.pos[1])
-                else:
-                    panel.handle(ev, VIEW_W)
-
+                if ev.pos[0] < VIEW_W:  camera.drag(ev.pos[0], ev.pos[1])
+                else:                   panel.handle(ev, VIEW_W)
             elif ev.type == MOUSEWHEEL:
                 if pygame.mouse.get_pos()[0] < VIEW_W:
                     camera.scroll(ev.y)
@@ -925,60 +887,61 @@ def main(frames_dir: str = "./frames"):
         # ── update ────────────────────────────────────────────────────────────
         starfield.update(dt)
 
+        # Load frame into VBO if frame index changed
+        if panel.cur_frame != _loaded_f:
+            frame_cache.ensure_loaded(panel.cur_frame)
+            _loaded_f = panel.cur_frame
+            panel.needs_redraw = True   # update frame counter text
+
+        # Apply real-time XY scale for diameter preview
+        frame_cache.buf.set_xy_scale(panel.preview_xy_scale)
+
         # ── render ────────────────────────────────────────────────────────────
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        # 1 ─ Star field (orthographic, full 3-D viewport) ────────────────────
+        # 1 ── Star field (orthographic overlay over 3-D viewport) ─────────────
         glViewport(0, 0, VIEW_W, WIN_H)
         glMatrixMode(GL_PROJECTION); glLoadIdentity()
-        glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        glOrtho(-1, 1, -1, 1, -1, 1)
         glMatrixMode(GL_MODELVIEW);  glLoadIdentity()
-        glDisable(GL_DEPTH_TEST)
         starfield.draw()
 
-        # 2 ─ 3-D stent ───────────────────────────────────────────────────────
-        verts, faces, normals, ctr, scl = frame_cache.get(panel.cur_frame)
-
+        # 2 ── 3-D stent ───────────────────────────────────────────────────────
         glViewport(0, 0, VIEW_W, WIN_H)
         glMatrixMode(GL_PROJECTION); glLoadIdentity()
-        gluPerspective(42.0, VIEW_W / WIN_H, 0.1, 800.0)
+        gluPerspective(42., VIEW_W/WIN_H, 0.1, 800.)
         glMatrixMode(GL_MODELVIEW);  glLoadIdentity()
-        glTranslatef(0.0, 0.0, -55.0)
-        camera.apply_gl()
+        glTranslatef(0., 0., -55.)
+        camera.apply()
 
-        if verts is not None and scl is not None:
-            glScalef(scl, scl, scl)
-            glTranslatef(-float(ctr[0]), -float(ctr[1]), -float(ctr[2]))
-            _draw_stent(verts, faces, normals,
-                        preview=panel.dirty,
-                        scale_preview=panel.preview_scale)
-        else:
-            # No frames — draw a placeholder message via panel
-            pass
+        buf = frame_cache.buf
+        if buf._vbo is not None:
+            glScalef(buf.fit_scale, buf.fit_scale, buf.fit_scale)
+            c = buf.centre
+            glTranslatef(-float(c[0]), -float(c[1]), -float(c[2]))
+            buf.draw(preview=panel.dirty)
 
-        # 3 ─ UI panel (pygame surface → GL texture) ──────────────────────────
-        if panel_tex is not None:
-            try:
+        # 3 ── UI panel (re-upload texture only when dirty) ────────────────────
+        if panel.needs_redraw:
+            surf = panel.render()
+            if panel_tex is not None:
                 glDeleteTextures(1, [panel_tex])
-            except Exception:
-                pass
-        panel_surf = panel.render()
-        panel_tex  = _surface_to_texture(panel_surf)
-        _draw_panel_texture(panel_tex, VIEW_W, WIN_W, WIN_H)
+            panel_tex = surface_to_tex(surf)
+
+        if panel_tex is not None:
+            draw_panel_tex(panel_tex, VIEW_W, WIN_W, WIN_H)
 
         pygame.display.flip()
-        clock.tick(TARGET_FPS)
+        clock.tick(FPS)
 
 
-def _cleanup(tex):
-    if tex is not None:
-        try:
-            glDeleteTextures(1, [tex])
-        except Exception:
-            pass
+def _quit(panel_tex, frame_cache):
+    if panel_tex:
+        try: glDeleteTextures(1, [panel_tex])
+        except Exception: pass
+    frame_cache.buf.free()
+    pygame.quit()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     fd = sys.argv[1] if len(sys.argv) > 1 else "./frames"
