@@ -88,7 +88,7 @@ def simulate(network: BeamNetwork,
     # The tube opening travels from z_MAX down to z_MIN.
     # z_norm = (z_max - z) / z_span  →  0 = top (released first), 1 = bottom (last)
     if verbose:
-        print(f"[solver] Phase 2: Deployment ({n_deploy_steps} steps, top→bottom) ...")
+        print(f"[solver] Phase 2: Deployment ({n_deploy_steps} steps, top->bottom) ...")
 
     z_ref  = ref_pos[:, 2]
     z_min  = float(z_ref.min())

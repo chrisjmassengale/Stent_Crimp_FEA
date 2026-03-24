@@ -1,246 +1,175 @@
 """
-deform.py — Mesh deformation and STL frame export.
+deform.py — Pure cylindrical coordinate mesh deformation.
 
-Strategy: delta_r preservation.
-  - Precompute delta_r = R_vertex - R_nearest_node (radial cross-section offset).
-  - Crimp frames: new_R = IDW(R_node_new) + delta_r
-  - Deploy frames: per-vertex z-based S-curve gives target_r_center,
-    then new_R = target_r_center + delta_r
+Every vertex moves purely radially — theta is frozen, so no twisting
+is geometrically possible.  Every vertex at the same Z gets the same
+scale factor — no differential stretching between neighbors.
+Polygon count is identical to input — we only touch positions, never topology.
+
+No special cases. No feature detection. No per-feature overrides.
+Just cylindrical coordinate scaling applied identically to all vertices.
 """
 
 import numpy as np
 import trimesh
 from pathlib import Path
 from typing import List, Dict
-from scipy.spatial import KDTree
 from tqdm import tqdm
 
 from topology import BeamNetwork
 
 
-# ── constants ─────────────────────────────────────────────────────────────────
-TRANSITION_CELLS = 1.5   # transition zone = 1.5 × cell_height (trumpet bell flare)
-FORESHORTEN_MAX  = 0.08  # max 8% axial compression at full deployment
-_IDW_K      = 6
-_IDW_POWER  = 3.0
+# ── defaults ──────────────────────────────────────────────────────────────────
+TRANSITION_FRAC  = 0.45   # transition zone = 45% of stent height
+SNAP_SPEED       = 3.0    # exponent in snap curve: 1 - (1-t)^n
+CROWN_DWELL      = 0.60   # fraction of crown arm that must be free before release
+EXPANSION_EXP    = 0.6    # global expansion curve exponent
 
 
-# ── pre-computation ────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-def _precompute(vertices: np.ndarray,
-                ref_nodes: np.ndarray,
-                center_xy: np.ndarray) -> dict:
-    """
-    Precompute per-vertex data that is fixed for the entire animation.
-
-    Returns a dict with:
-      idxs        (V, K)  — KD-tree nearest-node indices
-      weights     (V, K)  — IDW weights
-      nn          (V,)    — single nearest-node index
-      R_ref_nodes (N,)    — reference radial position of each node
-      delta_r     (V,)    — radial offset of vertex from nearest node
-      theta_v     (V,)    — angular position of vertex around stent axis
-      z_norm_v    (V,)    — normalised axial position (0=top, 1=bottom)
-      z_ref_nodes (N,)    — reference Z of each node
-      center_xy   (2,)
-    """
-    cx, cy = center_xy
-    K = min(_IDW_K, len(ref_nodes))
-
-    # Node radial positions
-    dx_n = ref_nodes[:, 0] - cx
-    dy_n = ref_nodes[:, 1] - cy
-    R_ref_nodes = np.sqrt(dx_n**2 + dy_n**2)
-
-    # KDTree nearest-node lookup
-    tree = KDTree(ref_nodes)
-    dists, idxs = tree.query(vertices, k=K)
-
-    # IDW weights
-    w = 1.0 / (dists + 1e-8) ** _IDW_POWER
-    w /= w.sum(axis=1, keepdims=True)
-
-    nn = idxs[:, 0]  # nearest node per vertex
-
-    # Vertex polar coordinates
-    vx = vertices[:, 0] - cx
-    vy = vertices[:, 1] - cy
-    R_v = np.sqrt(vx**2 + vy**2)
-    theta_v = np.arctan2(vy, vx)
-
-    # delta_r: radial offset from nearest node (preserves cross-section thickness)
-    delta_r = R_v - R_ref_nodes[nn]
-
-    # Normalised axial position per vertex (weighted from nearest nodes)
-    z_ref = ref_nodes[:, 2]
-    z_min = float(z_ref.min())
-    z_max = float(z_ref.max())
-    z_span = z_max - z_min if z_max > z_min else 1.0
-    z_norm_nodes = (z_max - z_ref) / z_span   # 0=top, 1=bottom
-    z_norm_v = (w * z_norm_nodes[idxs]).sum(axis=1)
-
-    return {
-        'idxs':         idxs,
-        'weights':      w,
-        'nn':           nn,
-        'R_ref_nodes':  R_ref_nodes,
-        'z_ref_nodes':  z_ref.copy(),
-        'delta_r':      delta_r,
-        'theta_v':      theta_v,
-        'z_norm_v':     z_norm_v,
-        'center_xy':    center_xy,
-    }
+def _smoothstep(x):
+    """Hermite smoothstep: clamp(x,0,1)^2 * (3 - 2*clamp(x,0,1))."""
+    t = np.clip(x, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
 
 
-# ── per-frame deformation ─────────────────────────────────────────────────────
-
-def _apply_radial(vertices, R_new_v, theta_v, zdelta_v, cx, cy):
-    """Apply new radial distances and Z deltas to produce new vertex array."""
-    R_new_v = np.maximum(R_new_v, 0.0)
-    out = vertices.copy()
-    mask = R_new_v > 1e-8
-    out[mask, 0] = cx + R_new_v[mask] * np.cos(theta_v[mask])
-    out[mask, 1] = cy + R_new_v[mask] * np.sin(theta_v[mask])
-    out[:, 2] = vertices[:, 2] + zdelta_v
-    return out
+def _snap_curve(t, speed=SNAP_SPEED):
+    """1 - (1-t)^speed — fast initial expansion, smooth settle."""
+    return 1.0 - (1.0 - t) ** speed
 
 
-def deform_crimp(vertices: np.ndarray,
-                 new_nodes: np.ndarray,
-                 pre: dict) -> np.ndarray:
-    """
-    Crimp frame: R_vertex = IDW(R_node_new) + delta_r.
-    Preserves strut cross-section radial offset throughout crimping.
-    """
-    cx, cy = pre['center_xy']
-    w, idxs = pre['weights'], pre['idxs']
-
-    dx_new = new_nodes[:, 0] - cx
-    dy_new = new_nodes[:, 1] - cy
-    R_new_nodes = np.sqrt(dx_new**2 + dy_new**2)
-
-    R_center_v = (w * R_new_nodes[idxs]).sum(axis=1)
-    R_new_v = R_center_v + pre['delta_r']
-
-    # Z: IDW of node Z displacement (solver freezes Z, so this is ~0)
-    zdelta_nodes = new_nodes[:, 2] - pre['z_ref_nodes']
-    zdelta_v = (w * zdelta_nodes[idxs]).sum(axis=1)
-
-    return _apply_radial(vertices, R_new_v, pre['theta_v'], zdelta_v, cx, cy)
-
-
-def deform_deploy(vertices: np.ndarray,
-                  new_nodes: np.ndarray,
-                  meta: dict,
-                  pre: dict) -> np.ndarray:
-    """
-    Deploy frame: per-vertex z-based smooth trumpet-bell transition.
-
-    Uses absolute cell-height-based transition length (matching real stent photos):
-      r(z) = r_crimp + (r_deploy - r_crimp) * smoothstep((z - z_tube_tip) / transition_length)
-    where transition_length = 1.5 * cell_height.
-
-    Also applies gentle axial foreshortening toward stent midpoint:
-      z_scale = 1.0 - 0.08 * r_frac
-    """
-    cx, cy   = pre['center_xy']
-    w, idxs  = pre['weights'], pre['idxs']
-    z_front  = meta['z_front_norm']
-    crimp_r  = meta['crimp_r']
-    deploy_r = meta['deploy_r']
-    z_span   = meta['z_span']
-    z_min    = meta['z_min']
-
-    # Transition window in normalised z, based on cell_height
-    cell_height = meta.get('cell_height', z_span / 6.0)
-    trans_norm  = TRANSITION_CELLS * cell_height / z_span
-
-    # d = how far past the tube tip this vertex is (positive = released)
-    d = z_front - pre['z_norm_v']
-
-    # Smooth trumpet-bell transition: smoothstep over transition_length
-    t_raw  = np.clip(d / trans_norm, 0.0, 1.0)
-    r_frac = t_raw * t_raw * (3.0 - 2.0 * t_raw)   # smoothstep
-
-    target_r_center = crimp_r + r_frac * (deploy_r - crimp_r)
-    R_new_v = target_r_center + pre['delta_r']
-
-    # Axial foreshortening: compress toward stent midpoint proportional to deployment
-    z_mid_norm = 0.5
-    z_norm_v   = pre['z_norm_v']
-    z_scale    = 1.0 - FORESHORTEN_MAX * r_frac
-    # Convert foreshortening to absolute z delta
-    # z_norm=0 is top (z_max), z_norm=1 is bottom (z_min)
-    # Compress toward midpoint in normalised coords, then convert to mm
-    z_foreshorten = (z_norm_v - z_mid_norm) * (1.0 - z_scale) * z_span
-
-    zdelta_nodes = new_nodes[:, 2] - pre['z_ref_nodes']
-    zdelta_v = (w * zdelta_nodes[idxs]).sum(axis=1)
-    # foreshortening adds a z shift (positive z_foreshorten means move toward mid)
-    # z_norm > 0.5 (bottom half) → shift up (+Z), z_norm < 0.5 (top half) → shift down (-Z)
-    zdelta_v = zdelta_v + z_foreshorten
-
-    return _apply_radial(vertices, R_new_v, pre['theta_v'], zdelta_v, cx, cy)
-
-
-# ── frame export ───────────────────────────────────────────────────────────────
+# ── frame export (the only public entry point) ────────────────────────────────
 
 def export_frames(mesh: trimesh.Trimesh,
                   network: BeamNetwork,
                   frames: List[np.ndarray],
                   meta: List[Dict],
                   output_dir: str,
-                  verbose: bool = True) -> List[str]:
-    """
-    Export one STL file per simulation frame.
-
-    Parameters
-    ----------
-    mesh       : original undeformed mesh
-    network    : beam network (reference node positions)
-    frames     : list of (N_nodes, 3) node-position arrays  (from solver)
-    meta       : parallel list of frame metadata dicts      (from solver)
-    output_dir : directory to write STL files
-    verbose    : show progress bar
-    """
+                  verbose: bool = True,
+                  transition_frac: float = TRANSITION_FRAC,
+                  snap_speed: float = SNAP_SPEED,
+                  crown_dwell: float = CROWN_DWELL,
+                  expansion_exponent: float = EXPANSION_EXP,
+                  **kwargs) -> List[str]:
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    ref_nodes = network.node_positions
-    center_xy = ref_nodes[:, :2].mean(axis=0)
+    # ── Store original vertex positions (never modified) ──────────────────────
+    orig = mesh.vertices.copy()
+    n_verts = len(orig)
+    n_faces = len(mesh.faces)
+
+    # Stent axis center (from solver — consistent across all frames)
+    cxy = meta[0]['center_xy']
+    cx, cy = float(cxy[0]), float(cxy[1])
+
+    # ── Precompute cylindrical coords once ────────────────────────────────────
+    dx = orig[:, 0] - cx
+    dy = orig[:, 1] - cy
+    r_orig = np.sqrt(dx ** 2 + dy ** 2)
+    theta  = np.arctan2(dy, dx)
+    z_orig = orig[:, 2]
+    r_center = np.median(r_orig)               # strut centerline radius
+    r_offset = r_orig - r_center               # cross-section offset (preserved)
+
+    # ── Crown geometry for dwell (only thing that varies by Z) ────────────────
+    node_z = network.node_positions[:, 2]
+    z_span_mesh = float(z_orig.max() - z_orig.min())
+
+    cluster_tol = 0.05 * z_span_mesh
+    z_sorted = np.sort(node_z)
+    cluster_centers = [z_sorted[0]]
+    for zv in z_sorted[1:]:
+        if zv - cluster_centers[-1] > cluster_tol:
+            cluster_centers.append(zv)
+        else:
+            cluster_centers[-1] = 0.5 * (cluster_centers[-1] + zv)
+    n_z_levels = len(cluster_centers)
+    n_cells = max(1, (n_z_levels - 1) // 2)
+    crown_arm_length = z_span_mesh / (2.0 * n_cells)
+    cell_height = 2.0 * crown_arm_length
+
+    # Graduated crown dwell
+    z_in_cell = (z_orig - float(z_orig.min())) % cell_height
+    z_cell_frac = z_in_cell / cell_height
+    crown_proximity = 2.0 * np.abs(z_cell_frac - 0.5)
+    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
 
     if verbose:
-        print("[deform] Pre-computing vertex assignments...")
-    pre = _precompute(mesh.vertices, ref_nodes, center_xy)
+        print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
+        print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
+              f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
+        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm, "
+              f"max_dwell={crown_arm_length * crown_dwell:.2f} mm")
+        print(f"[deform] Transition={transition_frac:.2f}  snap={snap_speed:.1f}  "
+              f"dwell={crown_dwell:.2f}  expansion_exp={expansion_exponent:.2f}")
 
-    n_frames = len(frames)
-    paths = []
+    # ── Per-frame deformation ─────────────────────────────────────────────────
+    paths: List[str] = []
 
-    iter_ = tqdm(enumerate(zip(frames, meta)), total=n_frames,
-                 desc="Exporting STL frames", disable=not verbose)
+    for idx, fm in tqdm(enumerate(meta), total=len(meta),
+                        desc="Exporting STL frames", disable=not verbose):
 
-    for idx, (node_pos, frame_meta) in iter_:
-        if frame_meta.get('type') == 'deploy':
-            new_verts = deform_deploy(mesh.vertices, node_pos, frame_meta, pre)
+        crimp_r  = fm['crimp_r']
+        deploy_r = fm['deploy_r']
+
+        # ── CRIMP: uniform radial scale ───────────────────────────────────────
+        if fm['type'] == 'crimp':
+            r_new = r_center * fm['scale'] + r_offset
+            z_new = z_orig
+
+        # ── DEPLOY: z-based tube-retraction with snap-back ────────────────────
         else:
-            new_verts = deform_crimp(mesh.vertices, node_pos, pre)
+            z_min  = fm['z_min']
+            z_span = fm['z_span']
+            z_max  = z_min + z_span
+            z_front = fm['z_front_norm']
 
+            tube_tip_z = z_max - z_front * z_span
+            trans_len  = transition_frac * z_span
+
+            # Global expansion factor
+            released_length_frac = np.clip((z_max - tube_tip_z) / z_span, 0.0, 1.0)
+            global_exp = released_length_frac ** expansion_exponent
+            r_max = crimp_r + (deploy_r - crimp_r) * global_exp
+
+            # Crown dwell
+            z_effective = z_orig - dwell_per_vertex
+
+            # Per-vertex released fraction
+            d = z_effective - tube_tip_z
+            released = _smoothstep(d / trans_len)
+            snap     = _snap_curve(released, snap_speed)
+
+            # Target centerline radius — SAME FORMULA FOR EVERY VERTEX
+            r_centerline = crimp_r + (r_max - crimp_r) * snap
+            r_new = r_centerline + r_offset
+            z_new = z_orig
+
+        # ── Convert back to cartesian — SAME FOR EVERY VERTEX ────────────────
+        new_verts = np.empty_like(orig)
+        new_verts[:, 0] = cx + r_new * np.cos(theta)
+        new_verts[:, 1] = cy + r_new * np.sin(theta)
+        new_verts[:, 2] = z_new
+
+        # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
             vertices=new_verts,
             faces=mesh.faces.copy(),
-            process=False
+            process=False,
         )
         fname = out_path / f"frame_{idx:03d}.stl"
         deformed.export(str(fname))
         paths.append(str(fname))
 
     if verbose:
-        print(f"[deform] Wrote {n_frames} STL frames to {output_dir!r}")
+        print(f"[deform] Wrote {len(paths)} frames ({n_verts}v {n_faces}f each)")
 
     return paths
 
 
-# ── diagnostics ────────────────────────────────────────────────────────────────
+# ── diagnostics (kept for simulate.py compatibility) ──────────────────────────
 
 def check_mesh_quality(mesh: trimesh.Trimesh) -> dict:
     """Return a dict of mesh quality metrics."""
@@ -253,18 +182,3 @@ def check_mesh_quality(mesh: trimesh.Trimesh) -> dict:
         "bounds_max":   mesh.bounds[1].tolist(),
         "euler_number": mesh.euler_number,
     }
-
-
-def validate_deformation(ref_mesh: trimesh.Trimesh,
-                         def_mesh: trimesh.Trimesh,
-                         max_stretch_ratio: float = 5.0) -> bool:
-    """Check that the deformation is physically reasonable."""
-    ref_edges = ref_mesh.edges_unique
-    ref_lens = np.linalg.norm(
-        ref_mesh.vertices[ref_edges[:, 0]] - ref_mesh.vertices[ref_edges[:, 1]], axis=1
-    )
-    def_lens = np.linalg.norm(
-        def_mesh.vertices[ref_edges[:, 0]] - def_mesh.vertices[ref_edges[:, 1]], axis=1
-    )
-    ratios = def_lens / (ref_lens + 1e-12)
-    return not (ratios.max() > max_stretch_ratio or ratios.min() < 1.0 / max_stretch_ratio)

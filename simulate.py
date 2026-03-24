@@ -59,6 +59,16 @@ def parse_args():
                    help="Run topology extraction only and exit")
     p.add_argument("--strategy", choices=["auto", "rbf", "idw"], default="auto",
                    help="Mesh deformation interpolation strategy (default: auto)")
+    p.add_argument("--transition-length", type=float, default=0.45,
+                   help="Transition zone as fraction of stent height (default: 0.45)")
+    p.add_argument("--snap-speed", type=float, default=3.0,
+                   help="Snap-back exponent: 1-(1-t)^n, higher=snappier (default: 3.0)")
+    p.add_argument("--crown-dwell", type=float, default=0.60,
+                   help="Crown dwell fraction 0-1: how long crowns stay crimped (default: 0.60)")
+    p.add_argument("--expansion-exponent", type=float, default=0.6,
+                   help="Global expansion curve exponent: lower=more constrained early (default: 0.6)")
+    p.add_argument("--tine-flare", type=float, default=1.15,
+                   help="Crown tine flare factor: tines expand to this * deployed_r (default: 1.15)")
     return p.parse_args()
 
 
@@ -156,6 +166,10 @@ def main():
     print(f"  Output directory : {args.output_dir}")
     print(f"  Crimping steps   : {args.n_crimp_steps}")
     print(f"  Deployment steps : {args.n_deploy_steps}")
+    print(f"  Transition length: {args.transition_length}")
+    print(f"  Snap speed       : {args.snap_speed}")
+    print(f"  Crown dwell      : {args.crown_dwell}")
+    print(f"  Expansion exp    : {args.expansion_exponent}")
     print()
 
     # Step 1: Topology extraction
@@ -217,7 +231,12 @@ def main():
     print("[4/4] Exporting STL frames...")
     try:
         paths = export_frames(mesh, network, frames_out, meta_out,
-                              args.output_dir, verbose=verbose)
+                              args.output_dir, verbose=verbose,
+                              transition_frac=args.transition_length,
+                              snap_speed=args.snap_speed,
+                              crown_dwell=args.crown_dwell,
+                              expansion_exponent=args.expansion_exponent,
+                              tine_flare=args.tine_flare)
     except Exception as e:
         print(f"Fatal: frame export failed — {e}", file=sys.stderr)
         import traceback

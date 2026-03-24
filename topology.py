@@ -101,7 +101,110 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
         print(f"[topology] After preprocessing: extents={mesh.extents.round(2)} mm, "
               f"bounds Z=[{mesh.bounds[0,2]:.2f}, {mesh.bounds[1,2]:.2f}]")
 
+    # ── Weld near-coincident vertices at cell seams ──────────────────────────
+    mesh = _weld_seam_vertices(mesh, tolerance=0.01, verbose=verbose)
+
+    # Remove stretched faces that are BOTH long-edged AND span a large angular
+    # range (cross-stent assembly artifacts). Keeps longitudinal strut faces
+    # (long edges but all vertices at similar theta).
+    v, f = mesh.vertices, mesh.faces
+    c_xy = centroid(v)[:2]
+    e0 = np.linalg.norm(v[f[:, 1]] - v[f[:, 0]], axis=1)
+    e1 = np.linalg.norm(v[f[:, 2]] - v[f[:, 1]], axis=1)
+    e2 = np.linalg.norm(v[f[:, 0]] - v[f[:, 2]], axis=1)
+    max_e = np.maximum(e0, np.maximum(e1, e2))
+    median_e = float(np.median(np.concatenate([e0, e1, e2])))
+    long_edge = max_e > 20 * median_e
+
+    # Angular span of each face's vertices
+    ft = np.arctan2(v[f, 1] - c_xy[1], v[f, 0] - c_xy[0])  # (F, 3)
+    dt01 = np.abs(np.arctan2(np.sin(ft[:, 0] - ft[:, 1]), np.cos(ft[:, 0] - ft[:, 1])))
+    dt12 = np.abs(np.arctan2(np.sin(ft[:, 1] - ft[:, 2]), np.cos(ft[:, 1] - ft[:, 2])))
+    dt02 = np.abs(np.arctan2(np.sin(ft[:, 0] - ft[:, 2]), np.cos(ft[:, 0] - ft[:, 2])))
+    max_dt = np.maximum(dt01, np.maximum(dt12, dt02))
+
+    # Only remove faces that are long AND span > 30 degrees (cross-stent)
+    stretched = long_edge & (max_dt > np.radians(30))
+    n_stretched = int(stretched.sum())
+    if n_stretched > 0 and n_stretched < 0.05 * len(f):
+        good_faces = f[~stretched]
+        if verbose:
+            print(f"[topology] Removed {n_stretched} cross-stent artifact faces "
+                  f"(kept {int(long_edge.sum()) - n_stretched} long strut faces)")
+        mesh = trimesh.Trimesh(vertices=v, faces=good_faces, process=False)
+
     return mesh
+
+
+def _weld_seam_vertices(mesh: trimesh.Trimesh,
+                        tolerance: float = 0.01,
+                        verbose: bool = True) -> trimesh.Trimesh:
+    """
+    Merge near-coincident vertices from cell tiling assembly seams.
+
+    When a stent mesh is built by repeating a unit cell along Z, the top
+    vertices of cell[i] and bottom vertices of cell[i+1] are separate
+    vertices at nearly-the-same position.  This causes visible seam kinks
+    and degenerate stretched polygons.  Welding them fixes both.
+    """
+    v = mesh.vertices
+    f = mesh.faces
+
+    if verbose:
+        print(f"[topology] Vertex weld: {len(v)} vertices, tolerance={tolerance:.3f} mm...")
+
+    # Use spatial hashing via rounding — O(N) and handles any mesh size.
+    # Round vertex positions to tolerance grid, group by grid cell.
+    scale = 1.0 / tolerance
+    quantized = np.round(v * scale).astype(np.int64)
+
+    # Pack xyz into a single sortable key per vertex
+    # Shift to positive range first
+    qmin = quantized.min(axis=0)
+    q = quantized - qmin
+    # Cantor-style packing (safe for stent-sized coords)
+    keys = q[:, 0] * 1000000000 + q[:, 1] * 1000000 + q[:, 2]
+
+    # Sort by key — identical keys = same grid cell = should merge
+    order = np.argsort(keys)
+    sorted_keys = keys[order]
+
+    # Find group boundaries
+    mapping = np.empty(len(v), dtype=int)
+    group_start = 0
+    for i in range(1, len(sorted_keys) + 1):
+        if i == len(sorted_keys) or sorted_keys[i] != sorted_keys[group_start]:
+            # All vertices from group_start..i-1 share the same grid cell
+            representative = order[group_start]  # lowest original index in group
+            for j in range(group_start, i):
+                mapping[order[j]] = representative
+            group_start = i
+
+    n_merged = len(v) - len(np.unique(mapping))
+
+    # Remap faces
+    new_faces = mapping[f]
+
+    # Remove degenerate faces (two or more vertices collapsed to same index)
+    valid = ((new_faces[:, 0] != new_faces[:, 1]) &
+             (new_faces[:, 1] != new_faces[:, 2]) &
+             (new_faces[:, 0] != new_faces[:, 2]))
+    n_removed = int((~valid).sum())
+    new_faces = new_faces[valid]
+
+    # Compact: keep only referenced vertices
+    used = np.unique(new_faces)
+    compact = np.zeros(len(v), dtype=int)
+    compact[used] = np.arange(len(used))
+    new_verts = v[used]
+    new_faces = compact[new_faces]
+
+    if verbose:
+        print(f"[topology] Vertex weld: merged {n_merged} verts, "
+              f"removed {n_removed} degenerate faces "
+              f"({len(v)}v->{len(new_verts)}v, {len(f)}f->{len(new_faces)}f)")
+
+    return trimesh.Trimesh(vertices=new_verts, faces=new_faces, process=False)
 
 
 class BeamNetwork:
@@ -161,7 +264,7 @@ def load_and_extract(stl_path: str, verbose: bool = True,
     """
     if verbose:
         print(f"[topology] Loading STL: {stl_path}")
-    mesh = trimesh.load(stl_path, force='mesh')
+    mesh = trimesh.load(stl_path, force='mesh', process=False)
 
     if not isinstance(mesh, trimesh.Trimesh):
         raise ValueError(f"Could not load a single mesh from {stl_path!r}. "
@@ -232,7 +335,8 @@ def _extract_via_skeleton(mesh, merge_r, min_len, verbose):
     cross_axes = np.sort(stent_extents)[:2]
     stent_diam = float(cross_axes.mean())
     max_beam_len = stent_diam * 0.7
-    G = _prune_graph(G, max_beam_len, verbose=verbose)
+    center_xy = centroid(mesh.vertices)[:2]
+    G = _prune_graph(G, max_beam_len, center_xy=center_xy, verbose=verbose)
 
     _assign_strut_radii(G, mesh)
 
@@ -332,21 +436,50 @@ def _simplify_graph(G: nx.Graph, max_angle_deg: float) -> nx.Graph:
 
 
 def _prune_graph(G: nx.Graph, max_beam_length: float,
+                 center_xy: np.ndarray = None,
                  verbose: bool = False) -> nx.Graph:
     """
     Remove beams longer than max_beam_length (spurious cross-stent edges),
     then iteratively prune degree-1 (dangling) nodes until stable.
 
-    Long beams usually result from the edge-extraction picking up continuous
-    boundary edges that run axially along a solid-mesh strut, creating
-    node-to-node connections that span the full stent height.
+    Exempts longitudinal connector struts: long edges that are axially aligned
+    (low theta variation between endpoints) are real structural features.
     """
-    # Remove over-long beams
-    long_edges = [(u, v) for u, v, d in G.edges(data=True)
-                  if d['rest_length'] > max_beam_length]
+    cx = float(center_xy[0]) if center_xy is not None else 0.0
+    cy = float(center_xy[1]) if center_xy is not None else 0.0
+
+    long_edges = []
+    for u, v, d in G.edges(data=True):
+        if d['rest_length'] <= max_beam_length:
+            continue
+
+        pos_u = G.nodes[u]['pos']
+        pos_v = G.nodes[v]['pos']
+
+        # Theta difference between endpoints
+        theta_u = np.arctan2(pos_u[1] - cy, pos_u[0] - cx)
+        theta_v = np.arctan2(pos_v[1] - cy, pos_v[0] - cx)
+        dtheta = abs(np.arctan2(np.sin(theta_u - theta_v),
+                                np.cos(theta_u - theta_v)))
+        dz = abs(pos_u[2] - pos_v[2])
+
+        # Only prune if circumferentially spread (dtheta > 30 degrees).
+        # Axially aligned long edges (dtheta < 30 deg) are real longitudinal struts.
+        if dtheta > np.radians(30):
+            long_edges.append((u, v))
+            if verbose:
+                print(f"[topology] Pruning spurious edge: "
+                      f"len={d['rest_length']:.2f}mm "
+                      f"dtheta={np.degrees(dtheta):.1f}deg dz={dz:.1f}mm")
+        else:
+            if verbose:
+                print(f"[topology] Keeping longitudinal strut: "
+                      f"len={d['rest_length']:.2f}mm "
+                      f"dtheta={np.degrees(dtheta):.1f}deg dz={dz:.1f}mm")
+
     if verbose and long_edges:
-        print(f"[topology] Pruning {len(long_edges)} beams longer than "
-              f"{max_beam_length:.1f} mm")
+        print(f"[topology] Pruning {len(long_edges)} spurious beams "
+              f"(max_beam_length={max_beam_length:.1f} mm)")
     G.remove_edges_from(long_edges)
 
     # Prune dangling nodes (degree 0 or 1) iteratively
@@ -407,7 +540,8 @@ def _extract_via_edges(mesh, merge_r, min_len, verbose):
     stent_extents = bb_max2 - bb_min2
     cross_axes = np.sort(stent_extents)[:2]
     stent_diam = float(cross_axes.mean())
-    G = _prune_graph(G, stent_diam * 0.7, verbose=verbose)
+    center_xy = centroid(verts)[:2]
+    G = _prune_graph(G, stent_diam * 0.7, center_xy=center_xy, verbose=verbose)
     _assign_strut_radii(G, mesh)
     return BeamNetwork(G)
 
