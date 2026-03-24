@@ -267,18 +267,26 @@ class FramePlayer:
         dwell_shift   = crown_arm_len * dwell * crown_prox
         z_eff         = z - dwell_shift
 
-        # ── Global expansion factor ───────────────────────────────────────────
-        global_exp = t ** exp_e
-        r_max      = crimp_r + (deploy_r - crimp_r) * global_exp
-
         # ── Per-vertex released fraction (smoothstep over transition zone) ────
         tube_tip_z = z_max - t * z_span
         trans_len  = tl * z_span
         released   = _smoothstep((z_eff - tube_tip_z) / max(trans_len, 1e-6))
         snap_v     = _snap_curve(released, snap)
 
-        # ── New centerline radius ─────────────────────────────────────────────
-        r_cl  = crimp_r + (r_max - crimp_r) * snap_v
+        # ── Two-phase superelastic deployment ─────────────────────────────────
+        # Phase 1 — snap-back : strut exits tube → springs to 97 % of deployed
+        #            radius (superelastic, per-vertex via snap_v)
+        # Phase 2 — thermal   : slow creep 97 % → 100 % as struts warm above Af.
+        #            exp_e (Thermal Growth Rate) controls speed: higher = faster.
+        _SNAP_FRAC  = 0.97
+        t_release_v = np.clip((z_max - z_eff) / z_span, 0., 1.)
+        t_out_v     = np.clip(t - t_release_v, 0., 1.)
+        thermal_v   = _smoothstep(np.minimum(t_out_v * exp_e * 5., 1.))
+
+        r_snap_tgt  = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
+        r_cl  = (crimp_r
+                 + (r_snap_tgt - crimp_r)   * snap_v
+                 + (deploy_r   - r_snap_tgt) * thermal_v * released)
         r_new = (r_cl + self._r_offset).astype(np.float64)
 
         # ── Back to cartesian ─────────────────────────────────────────────────
