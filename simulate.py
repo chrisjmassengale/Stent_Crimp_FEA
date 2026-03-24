@@ -66,7 +66,7 @@ def parse_args():
     p.add_argument("--crown-dwell", type=float, default=0.60,
                    help="Crown dwell fraction 0-1: how long crowns stay crimped (default: 0.60)")
     p.add_argument("--expansion-exponent", type=float, default=0.6,
-                   help="Global expansion curve exponent: lower=more constrained early (default: 0.6)")
+                   help="Thermal growth rate after snap-back: higher=faster Af warm-up (default: 0.6)")
     p.add_argument("--tine-flare", type=float, default=1.15,
                    help="Crown tine flare factor: tines expand to this * deployed_r (default: 1.15)")
     p.add_argument("--no-viewer", action="store_true",
