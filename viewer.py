@@ -67,7 +67,7 @@ PARAM_SPECS = [
     ("transition_length",   "Transition Length",       0.1,   0.9,  0.01, "{:.2f}"),
     ("snap_speed",          "Snap Speed",              0.5,  10.0,  0.1,  "{:.1f}"),
     ("crown_dwell",         "Crown Dwell",             0.0,   1.0,  0.01, "{:.2f}"),
-    ("expansion_exponent",  "Expansion Exponent",      0.1,   2.0,  0.05, "{:.2f}"),
+    ("expansion_exponent",  "Thermal Growth Rate",      0.1,   2.0,  0.05, "{:.2f}"),
     ("tine_flare",          "Tine Flare",              1.0,   1.5,  0.01, "{:.2f}"),
 ]
 
