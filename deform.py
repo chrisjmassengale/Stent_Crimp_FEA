@@ -376,23 +376,37 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     all_widths = []
     nat_widths = None
 
+    # Pre-compute natural-state n_hat for each t_position so the same frame
+    # is used across all deformation states.  Using the deformed n_hat would
+    # make the width direction state-dependent and produce false FAIL reports
+    # (e.g. a diagonal strut that tilts during radial crimp changes t_hat,
+    # rotating n_hat, which alters the measured projection even when the
+    # physical cross-section is unchanged).
+    nat_npos = npos_nat.astype(np.float64)
+    nat_a = nat_npos[u]; nat_b = nat_npos[v]
+    nat_seg = nat_b - nat_a
+    nat_sl  = max(float(np.linalg.norm(nat_seg)), 1e-10)
+    nat_t_hat = nat_seg / nat_sl
+    nat_n_hats = []
+    nat_cps    = []
+    for t_pos in t_positions:
+        cp_n = nat_a + t_pos * nat_seg
+        _, n_h = _local_frame_at(cp_n, nat_t_hat, cx, cy)
+        nat_n_hats.append(n_h)
+        nat_cps.append(cp_n)
+
     def _measure_widths(verts_close, node_pos_state):
-        """Measure n_hat width at each t_position for the given deformed vertices."""
-        npos  = node_pos_state.astype(np.float64)
-        a     = npos[u]; b = npos[v]
-        seg   = b - a
-        sl    = max(float(np.linalg.norm(seg)), 1e-10)
-        t_hat = seg / sl
+        """Measure n_hat width at each t_position using the fixed natural-state frame."""
         ws = []
-        for t_pos in t_positions:
+        for i, t_pos in enumerate(t_positions):
             in_win = np.abs(t_s - t_pos) < window
             if in_win.sum() < 2:
                 ws.append(float('nan'))
                 continue
-            cp        = a + t_pos * seg
-            _, n_hat  = _local_frame_at(cp, t_hat, cx, cy)
-            delta     = verts_close[in_win].astype(np.float64) - cp[None, :]
-            n_vals    = delta @ n_hat
+            n_hat  = nat_n_hats[i]
+            cp     = nat_cps[i]
+            delta  = verts_close[in_win].astype(np.float64) - cp[None, :]
+            n_vals = delta @ n_hat
             ws.append(float(n_vals.max() - n_vals.min()))
         return ws
 
