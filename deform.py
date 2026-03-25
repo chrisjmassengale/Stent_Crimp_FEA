@@ -537,9 +537,9 @@ def export_frames(mesh: trimesh.Trimesh,
     _edges    = list(network.graph.edges())
     _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
 
-    AXIAL_MIN_DZ      = 15.0   # mm — z-span threshold for "long" strut
-    AXIAL_MAX_DXY_RAT = 0.35   # max XY drift / dz ratio to be "nearly axial"
-    AXIAL_BIND_MAX    = 5.0    # mm — max cross-section distance for vertex to qualify
+    AXIAL_MIN_DZ      = 30.0   # mm — z-span threshold for "long" strut
+    AXIAL_MAX_DXY_RAT = 0.12   # max XY drift / dz ratio to be "nearly axial"
+    AXIAL_BIND_MAX    = 1.0    # mm — max cross-section distance (≈ strut radius)
 
     axial_strut_list = []   # list of dicts: mask, u, v, t_params
     for ei, (u, v) in enumerate(_edges):
