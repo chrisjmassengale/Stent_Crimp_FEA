@@ -619,18 +619,25 @@ def export_frames(mesh: trimesh.Trimesh,
             r_cl = crimp_r + (deploy_r - crimp_r) * snap_v
 
             # ── Long axial strut override ────────────────────────────────────
-            # Replace per-vertex z-based r_cl with the solver's per-strut radius,
-            # interpolated linearly between the two junction node positions.
-            # This eliminates the kink at the deployment front because each
-            # vertex's r follows the strut's actual release profile, not its
-            # own z position independently.
+            # Replace per-vertex z-based r_cl with strut-level interpolation.
+            # Uses the solver's per-node radius (already encodes the release
+            # state) and adds a sinusoidal outward bow when one end is more
+            # deployed than the other — matching the elastic spring-back arc
+            # a real Nitinol beam forms under unequal end conditions.
+            BOW_FRAC = 0.18   # bow amplitude as fraction of radius differential
             node_pos = frames[idx]   # (N_nodes, 3)
             for sd in axial_strut_list:
                 p_u = node_pos[sd['u']];  p_v = node_pos[sd['v']]
                 r_u = float(np.sqrt((p_u[0] - cx)**2 + (p_u[1] - cy)**2))
                 r_v = float(np.sqrt((p_v[0] - cx)**2 + (p_v[1] - cy)**2))
-                # Interpolate: t=0 → node u, t=1 → node v
-                r_cl[sd['mask']] = r_u + sd['t'] * (r_v - r_u)
+                t   = sd['t']
+                # Smooth Hermite interpolation (S-curve rather than linear kink)
+                t_s = t * t * (3.0 - 2.0 * t)
+                r_interp = r_u + (r_v - r_u) * t_s
+                # Outward bow: active only when top is more deployed than bottom.
+                # Peaks at t=0.5 (strut midpoint), zero at both endpoints.
+                bow = BOW_FRAC * max(0.0, r_u - r_v) * np.sin(np.pi * t)
+                r_cl[sd['mask']] = r_interp + bow
 
             r_new = r_cl + r_offset
 
