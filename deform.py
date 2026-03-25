@@ -616,12 +616,8 @@ def export_frames(mesh: trimesh.Trimesh,
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
-            t_rel_v    = np.clip((z_max - z_eff_v) / max(z_span, 1e-6), 0., 1.)
-            thermal_v  = _smoothstep(np.minimum(
-                             np.clip(t_global - t_rel_v, 0., 1.) * expansion_exponent * 5., 1.))
-            r_cl = (crimp_r
-                    + (deploy_r - crimp_r) * snap_v
-                    + (deploy_r - deploy_r) * thermal_v * released_v)   # snap alone → deploy_r
+            # Snap alone reaches deploy_r (snap_frac = 1.0).
+            r_cl = crimp_r + (deploy_r - crimp_r) * snap_v
 
             # ── Long axial strut override ────────────────────────────────────
             # Replace per-vertex z-based r_cl with the solver's per-strut radius,
