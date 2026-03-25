@@ -245,15 +245,35 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     # (i.e. its vertices are genuinely on that strut's cross-section).
     npos_nat = network.node_positions.astype(np.float64)
     MIN_VERTS_FOR_CANDIDATE = 8
-    edge_p80 = np.full(len(edges), np.inf)
+    T_SPAN_MIN = 0.30        # close vertices must span ≥30% of the edge length
+
+    edge_p80    = np.full(len(edges), np.inf)
+    edge_t_span = np.zeros(len(edges))
+
     for ei_cand in range(len(edges)):
         m_cand = edge_idx == ei_cand
         if m_cand.sum() < MIN_VERTS_FOR_CANDIDATE:
             continue
-        edge_p80[ei_cand] = float(np.percentile(cs_dist[m_cand], 80))
+        p80 = float(np.percentile(cs_dist[m_cand], 80))
+        edge_p80[ei_cand] = p80
+        # t-span of the close vertices for this edge (provisional threshold)
+        close_cand = m_cand & (cs_dist < p80 * 1.5)
+        if close_cand.sum() >= MIN_VERTS_FOR_CANDIDATE:
+            t_c = t_param[close_cand]
+            edge_t_span[ei_cand] = float(t_c.max() - t_c.min())
 
-    best_ei     = int(np.argmin(edge_p80))
-    PROX_THRESH = edge_p80[best_ei] * 1.5     # generous: 1.5× the p80 value
+    # Select most-compact edge that also has good axial vertex spread.
+    # Fall back to looser thresholds if no edge qualifies.
+    best_ei = None
+    used_t_thresh = 0.0
+    for t_thresh in [T_SPAN_MIN, 0.15, 0.05, 0.0]:
+        valid = (edge_p80 < np.inf) & (edge_t_span >= t_thresh)
+        if valid.any():
+            best_ei = int(np.argmin(np.where(valid, edge_p80, np.inf)))
+            used_t_thresh = t_thresh
+            break
+
+    PROX_THRESH = edge_p80[best_ei] * 1.5
 
     u, v        = edges[best_ei]
     seg_nat     = npos_nat[v] - npos_nat[u]
