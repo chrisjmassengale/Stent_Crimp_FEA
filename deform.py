@@ -577,46 +577,27 @@ def export_frames(mesh: trimesh.Trimesh,
         deploy_r = fm['deploy_r']
 
         # ──────────────────────────────────────────────────────────────────────
-        # CRIMP
+        # ──────────────────────────────────────────────────────────────────────
+        # CRIMP — pure cylindrical radial scale, Z frozen
         # ──────────────────────────────────────────────────────────────────────
         if fm['type'] == 'crimp':
             r_new = r_center * fm['scale'] + r_offset
-            z_new = z_orig
-
-        # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY
-        # ──────────────────────────────────────────────────────────────────────
-        else:
-            z_min   = fm['z_min'];  z_span = fm['z_span']
-            z_max   = z_min + z_span;  z_front = fm['z_front_norm']
-            trans_len  = transition_frac * z_span
-            # Scale the tube travel so z_front=1.0 → tube tip is one trans_len
-            # BELOW the minimum effective-Z of any vertex/node (after dwell
-            # subtraction).  This guarantees smoothstep → 1 for the last element
-            # regardless of dwell magnitude or transition width.
-            deploy_travel = z_max - (_deploy_eff_zmin - trans_len)
-            tube_tip_z = z_max - z_front * deploy_travel
-
-            _SNAP_FRAC = 1.0   # snap expansion alone reaches deploy_r;
-            t_global   = float(np.clip(z_front, 0., 1.))
-
-            r_snap_tgt  = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
-
-            # Skeleton-based deployment: each vertex follows its strut's
-            # deformed centreline (interpolated between the two junction nodes
-            # computed by the solver).  This eliminates the per-vertex kink at
-            # the deployment front — long axial struts now smoothly bow between
-            # their released top and constrained bottom endpoints.
-            new_verts = reconstruct_vertices_from_local_coords(
-                lc_export, frames[idx]).astype(np.float64)
-            # Skip to write — no further reconstruction needed.
-
-        if fm['type'] == 'crimp':
-            # ── Reconstruct crimped vertices (pure cylindrical) ───────────────
             new_verts = np.empty_like(orig)
             new_verts[:, 0] = cx + r_new * np.cos(theta)
             new_verts[:, 1] = cy + r_new * np.sin(theta)
-            new_verts[:, 2] = z_new
+            new_verts[:, 2] = z_orig
+
+        # ──────────────────────────────────────────────────────────────────────
+        # DEPLOY — skeleton-based strut interpolation
+        # ──────────────────────────────────────────────────────────────────────
+        else:
+            # Each vertex is translated by the displacement of its assigned
+            # skeleton centreline point (linear interpolation between the two
+            # solver-computed junction node positions).  Long axial struts
+            # smoothly transition from released (deploy_r) at the top to
+            # constrained (crimp_r) at the bottom — no per-vertex kink.
+            new_verts = reconstruct_vertices_from_local_coords(
+                lc_export, frames[idx]).astype(np.float64)
 
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
