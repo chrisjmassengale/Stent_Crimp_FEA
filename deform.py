@@ -575,12 +575,6 @@ def export_frames(mesh: trimesh.Trimesh,
         # CRIMP
         # ──────────────────────────────────────────────────────────────────────
         if fm['type'] == 'crimp':
-            # Local-frame path: scale skeleton nodes
-            npos_def = npos_nat.copy()
-            npos_def[:, 0] = cx + node_dx_nat * fm['scale']
-            npos_def[:, 1] = cy + node_dy_nat * fm['scale']
-
-            # Cylindrical path
             r_new = r_center * fm['scale'] + r_offset
             z_new = z_orig
 
