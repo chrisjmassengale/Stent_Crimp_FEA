@@ -526,21 +526,36 @@ def export_frames(mesh: trimesh.Trimesh,
 
     # ── Build local frame coords (dense-skeleton binding) ─────────────────────
     lc = build_vertex_local_coords(mesh, network, cxy)
-    if lc['max_bind_dist'] > 2.0:
-        raise RuntimeError(
-            f"Skeleton binding failed: max dist {lc['max_bind_dist']:.2f} mm > 2 mm. "
-            "Reduce MAX_DENSE_SEG_LEN in build_vertex_local_coords.")
 
-    # ── Precompute natural node geometry ──────────────────────────────────────
+    # Hybrid strategy:
+    #   Strut-surface vertices (< CLOSE_THRESH from skeleton) → local frame
+    #   Body / solid / far vertices                           → cylindrical
+    # The stent solid body (inner/outer walls, end caps) lies several mm from
+    # any skeleton centreline; cylindrical deformation is correct there.
+    # Strut cross-sections are < 0.5 mm wide, so CLOSE_THRESH cleanly separates
+    # them from the solid body.
+    CLOSE_THRESH  = 0.5   # mm
+    dist_to_skel  = np.sqrt((lc['offset']**2).sum(axis=1))
+    use_local     = dist_to_skel < CLOSE_THRESH   # (V,) bool
+
+    # ── Precompute cylindrical coords (used for body vertices) ────────────────
+    dx = orig[:, 0] - cx;  dy = orig[:, 1] - cy
+    r_orig   = np.sqrt(dx**2 + dy**2)
+    theta    = np.arctan2(dy, dx)
+    z_orig   = orig[:, 2]
+    r_center = np.median(r_orig)
+    r_offset = r_orig - r_center
+
+    # ── Precompute skeleton node geometry (used for local-frame path) ─────────
     npos_nat    = lc['npos_nat']
     node_z_vals = npos_nat[:, 2]
     node_dx_nat = npos_nat[:, 0] - cx
     node_dy_nat = npos_nat[:, 1] - cy
     node_r_nat  = np.sqrt(node_dx_nat**2 + node_dy_nat**2)
 
-    # ── Crown geometry for node-level dwell ───────────────────────────────────
-    node_z      = node_z_vals
-    z_span_mesh = float(node_z.max() - node_z.min())
+    # ── Crown geometry for dwell (both paths share the same cell layout) ──────
+    node_z      = network.node_positions[:, 2]
+    z_span_mesh = float(z_orig.max() - z_orig.min())
 
     cluster_tol = 0.05 * z_span_mesh
     z_sorted = np.sort(node_z)
@@ -555,20 +570,26 @@ def export_frames(mesh: trimesh.Trimesh,
     crown_arm_length = z_span_mesh / (2.0 * n_cells)
     cell_height = 2.0 * crown_arm_length
 
-    node_z_in_cell   = (node_z - float(node_z.min())) % cell_height
-    node_z_cell_frac = node_z_in_cell / cell_height
-    node_crown_prox  = 2.0 * np.abs(node_z_cell_frac - 0.5)
-    node_dwell       = crown_arm_length * crown_dwell * node_crown_prox
+    # Per-vertex dwell (cylindrical path)
+    z_in_cell        = (z_orig - float(z_orig.min())) % cell_height
+    crown_proximity  = 2.0 * np.abs(z_in_cell / cell_height - 0.5)
+    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
+
+    # Per-node dwell (local-frame path)
+    n_z_in_cell   = (node_z_vals - float(node_z_vals.min())) % cell_height
+    node_crown_prox = 2.0 * np.abs(n_z_in_cell / cell_height - 0.5)
+    node_dwell      = crown_arm_length * crown_dwell * node_crown_prox
 
     if verbose:
-        r_range = np.sqrt((orig[:, 0]-cx)**2 + (orig[:, 1]-cy)**2)
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
-              f"R range: [{r_range.min():.2f}, {r_range.max():.2f}] mm")
+              f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
         print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm, "
               f"max_dwell={crown_arm_length * crown_dwell:.2f} mm")
         print(f"[deform] Transition={transition_frac:.2f}  snap={snap_speed:.1f}  "
               f"dwell={crown_dwell:.2f}  expansion_exp={expansion_exponent:.2f}")
+        print(f"[deform] Hybrid: {use_local.sum()} strut verts (local-frame) + "
+              f"{(~use_local).sum()} body verts (cylindrical)")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
@@ -579,44 +600,72 @@ def export_frames(mesh: trimesh.Trimesh,
         crimp_r  = fm['crimp_r']
         deploy_r = fm['deploy_r']
 
-        # ── CRIMP: radial scale of skeleton nodes ─────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
+        # CRIMP
+        # ──────────────────────────────────────────────────────────────────────
         if fm['type'] == 'crimp':
+            # Local-frame path: scale skeleton nodes
             npos_def = npos_nat.copy()
             npos_def[:, 0] = cx + node_dx_nat * fm['scale']
             npos_def[:, 1] = cy + node_dy_nat * fm['scale']
 
-        # ── DEPLOY: per-node z-based snap + thermal release ───────────────────
+            # Cylindrical path
+            r_new = r_center * fm['scale'] + r_offset
+            z_new = z_orig
+
+        # ──────────────────────────────────────────────────────────────────────
+        # DEPLOY
+        # ──────────────────────────────────────────────────────────────────────
         else:
-            z_min   = fm['z_min']
-            z_span  = fm['z_span']
-            z_max   = z_min + z_span
-            z_front = fm['z_front_norm']
+            z_min   = fm['z_min'];  z_span = fm['z_span']
+            z_max   = z_min + z_span;  z_front = fm['z_front_norm']
+            tube_tip_z = z_max - z_front * z_span
+            trans_len  = transition_frac * z_span
 
-            tube_tip_z  = z_max - z_front * z_span
-            trans_len   = transition_frac * z_span
-            z_eff_nodes = node_z_vals - node_dwell
+            _SNAP_FRAC = 0.97
+            t_global   = float(np.clip(z_front, 0., 1.))
 
-            released = _smoothstep((z_eff_nodes - tube_tip_z) / trans_len)
-            snap     = _snap_curve(released, snap_speed)
-
-            _SNAP_FRAC  = 0.97
-            t_global    = float(np.clip(z_front, 0., 1.))
-            t_release_n = np.clip((z_max - z_eff_nodes) / max(z_span, 1e-6), 0., 1.)
-            t_out_n     = np.clip(t_global - t_release_n, 0., 1.)
-            thermal_n   = _smoothstep(np.minimum(t_out_n * expansion_exponent * 5., 1.))
-
-            r_snap_tgt    = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
-            r_node_target = (crimp_r
-                             + (r_snap_tgt - crimp_r)   * snap
-                             + (deploy_r   - r_snap_tgt) * thermal_n * released)
-
-            s_nodes = np.where(node_r_nat > 1e-8, r_node_target / node_r_nat, 1.0)
-            npos_def = npos_nat.copy()
+            # Local-frame path: per-node release
+            z_eff_n     = node_z_vals - node_dwell
+            released_n  = _smoothstep((z_eff_n - tube_tip_z) / trans_len)
+            snap_n      = _snap_curve(released_n, snap_speed)
+            t_rel_n     = np.clip((z_max - z_eff_n) / max(z_span, 1e-6), 0., 1.)
+            thermal_n   = _smoothstep(np.minimum(
+                              np.clip(t_global - t_rel_n, 0., 1.) * expansion_exponent * 5., 1.))
+            r_snap_tgt  = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
+            r_node_tgt  = (crimp_r
+                           + (r_snap_tgt - crimp_r)   * snap_n
+                           + (deploy_r   - r_snap_tgt) * thermal_n * released_n)
+            s_nodes     = np.where(node_r_nat > 1e-8, r_node_tgt / node_r_nat, 1.0)
+            npos_def    = npos_nat.copy()
             npos_def[:, 0] = cx + node_dx_nat * s_nodes
             npos_def[:, 1] = cy + node_dy_nat * s_nodes
 
-        # ── Reconstruct mesh from local frame offsets (Rodrigues rotation) ────
-        new_verts = reconstruct_vertices_from_local_coords(lc, npos_def)
+            # Cylindrical path: per-vertex release
+            z_eff_v    = z_orig - dwell_per_vertex
+            released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
+            snap_v     = _snap_curve(released_v, snap_speed)
+            t_rel_v    = np.clip((z_max - z_eff_v) / max(z_span, 1e-6), 0., 1.)
+            thermal_v  = _smoothstep(np.minimum(
+                             np.clip(t_global - t_rel_v, 0., 1.) * expansion_exponent * 5., 1.))
+            r_cl       = (crimp_r
+                          + (r_snap_tgt - crimp_r)   * snap_v
+                          + (deploy_r   - r_snap_tgt) * thermal_v * released_v)
+            r_new = r_cl + r_offset
+            z_new = z_orig
+
+        # ── Reconstruct mesh vertices ─────────────────────────────────────────
+        # Local frame (strut vertices)
+        lf_verts = reconstruct_vertices_from_local_coords(lc, npos_def)
+
+        # Cylindrical (body vertices)
+        cyl_verts = np.empty_like(orig)
+        cyl_verts[:, 0] = cx + r_new * np.cos(theta)
+        cyl_verts[:, 1] = cy + r_new * np.sin(theta)
+        cyl_verts[:, 2] = z_new
+
+        # Hybrid blend: use local frame where binding is close
+        new_verts = np.where(use_local[:, None], lf_verts, cyl_verts)
 
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
