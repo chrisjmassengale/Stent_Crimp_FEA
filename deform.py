@@ -610,28 +610,11 @@ def export_frames(mesh: trimesh.Trimesh,
             r_new = r_cl + r_offset
             z_new = z_orig
 
-        # ── Reconstruct mesh vertices ─────────────────────────────────────────
-        # Cylindrical (all vertices — always computed)
-        cyl_verts = np.empty_like(orig)
-        cyl_verts[:, 0] = cx + r_new * np.cos(theta)
-        cyl_verts[:, 1] = cy + r_new * np.sin(theta)
-        cyl_verts[:, 2] = z_new
-
-        if fm['type'] == 'crimp':
-            # Crimp: hybrid — local frame for strut verts preserves cross-section
-            # width during pure radial scale (cylindrical would shrink it by scale).
-            lf_verts = reconstruct_vertices_from_local_coords(lc, npos_def)
-            new_verts = np.where(use_local[:, None], lf_verts, cyl_verts)
-        else:
-            # Deploy: pure cylindrical for every vertex.
-            # The local-frame method requires the skeleton segment to be
-            # geometrically consistent (both endpoints at similar radii).
-            # In the deployment transition zone one node can be at deploy_r
-            # and the adjacent node still at crimp_r; the resulting diagonal
-            # segment produces severely twisted/curled strut geometry.
-            # Cylindrical is per-vertex and Z-driven, so it is smooth across
-            # the front and avoids this distortion entirely.
-            new_verts = cyl_verts
+        # ── Reconstruct mesh vertices (pure cylindrical) ──────────────────────
+        new_verts = np.empty_like(orig)
+        new_verts[:, 0] = cx + r_new * np.cos(theta)
+        new_verts[:, 1] = cy + r_new * np.sin(theta)
+        new_verts[:, 2] = z_new
 
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
