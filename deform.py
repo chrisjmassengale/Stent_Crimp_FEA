@@ -610,10 +610,14 @@ def export_frames(mesh: trimesh.Trimesh,
         else:
             z_min   = fm['z_min'];  z_span = fm['z_span']
             z_max   = z_min + z_span;  z_front = fm['z_front_norm']
-            tube_tip_z = z_max - z_front * z_span
             trans_len  = transition_frac * z_span
+            # Extend the tube travel range by one transition length below z_min so
+            # the bottom of the stent is fully released when z_front reaches 1.0.
+            # Without this, tube_tip_z == z_min at z_front=1 gives released=0 at
+            # the bottom vertex (smoothstep(0)=0 → still crimped).
+            tube_tip_z = z_max - z_front * (z_span + trans_len)
 
-            _SNAP_FRAC = 0.97
+            _SNAP_FRAC = 1.0   # snap expansion alone reaches deploy_r;
             t_global   = float(np.clip(z_front, 0., 1.))
 
             # Local-frame path: per-node release
