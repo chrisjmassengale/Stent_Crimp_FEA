@@ -523,14 +523,7 @@ def export_frames(mesh: trimesh.Trimesh,
     r_center = np.median(r_orig)
     r_offset = r_orig - r_center
 
-    # ── Precompute skeleton node geometry (used for local-frame path) ─────────
-    npos_nat    = lc['npos_nat']
-    node_z_vals = npos_nat[:, 2]
-    node_dx_nat = npos_nat[:, 0] - cx
-    node_dy_nat = npos_nat[:, 1] - cy
-    node_r_nat  = np.sqrt(node_dx_nat**2 + node_dy_nat**2)
-
-    # ── Crown geometry for dwell (both paths share the same cell layout) ──────
+    # ── Crown geometry for dwell ──────────────────────────────────────────────
     node_z      = network.node_positions[:, 2]
     z_span_mesh = float(z_orig.max() - z_orig.min())
 
