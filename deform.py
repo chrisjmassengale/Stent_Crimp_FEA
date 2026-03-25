@@ -639,6 +639,12 @@ def export_frames(mesh: trimesh.Trimesh,
 
             r_new = r_cl + r_offset
 
+        # ── Reconstruct vertices (pure cylindrical — both crimp and deploy) ───
+        new_verts = np.empty_like(orig)
+        new_verts[:, 0] = cx + r_new * np.cos(theta)
+        new_verts[:, 1] = cy + r_new * np.sin(theta)
+        new_verts[:, 2] = z_orig
+
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
             vertices=new_verts,
