@@ -610,6 +610,39 @@ def _analytical_fallback(mesh: trimesh.Trimesh, verbose: bool) -> BeamNetwork:
     return BeamNetwork(G)
 
 
+# ── raw skeleton extraction (no mesh preprocessing / vertex welding) ─────────
+
+def extract_skeleton_from_raw_mesh(mesh: trimesh.Trimesh,
+                                   center_xy: np.ndarray) -> BeamNetwork:
+    """
+    Extract skeleton from a mesh that is already in the correct coordinate
+    system (no unit conversion, reorientation, centering, or vertex welding).
+    Vertex indices in the returned BeamNetwork correspond 1-to-1 to the input
+    mesh vertices — safe to use for boolean masks on mesh.vertices.
+
+    Parameters
+    ----------
+    mesh      : trimesh.Trimesh  — already-processed mesh (no preprocessing done)
+    center_xy : (2,) array       — XY axis centre (e.g. bounding-box midpoint)
+    """
+    verts   = mesh.vertices
+    bb_min, bb_max = bounding_box(verts)
+    diag    = float(np.linalg.norm(bb_max - bb_min))
+    merge_r = MERGE_RADIUS_FRACTION * diag
+    min_len = MIN_BEAM_LENGTH_FRACTION * diag
+
+    edges   = _get_strut_edges(mesh)
+    G       = _build_raw_graph(verts, edges, merge_r, min_len)
+    G       = _simplify_graph(G, MAX_COLLINEAR_ANGLE_DEG)
+
+    stent_extents = bb_max - bb_min
+    cross_axes    = np.sort(stent_extents)[:2]
+    stent_diam    = float(cross_axes.mean())
+    G = _prune_graph(G, stent_diam * 0.7, center_xy=center_xy, verbose=False)
+    _assign_strut_radii(G, mesh)
+    return BeamNetwork(G)
+
+
 # ── diagnostic helper ──────────────────────────────────────────────────────────
 
 def describe_network(network: BeamNetwork):
