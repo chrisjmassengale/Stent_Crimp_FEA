@@ -416,7 +416,7 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
             diffs = [abs(ws[i] - nat_widths[i])
                      for i in range(3)
                      if not np.isnan(ws[i]) and not np.isnan(nat_widths[i])]
-            flag  = " ✓ ok" if diffs and all(d < 0.01 for d in diffs) else " ✗ FAIL"
+            flag  = "   ok " if diffs and all(d < 0.01 for d in diffs) else " FAIL "
 
         row = "  ".join(f"{w:>12.4f}" if not np.isnan(w) else f"{'N/A':>12}" for w in ws)
         print(f"  {label:<14}  {row}  {flag}")
