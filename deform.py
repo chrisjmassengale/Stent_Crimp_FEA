@@ -523,35 +523,10 @@ def export_frames(mesh: trimesh.Trimesh,
     r_center = np.median(r_orig)
     r_offset = r_orig - r_center
 
-    # ── Classify long axial spine struts ─────────────────────────────────────
-    # Long nearly-axial struts (theta frozen, dz large) appear as sharp
-    # straight lines during deployment because pure cylindrical deformation
-    # keeps theta constant.  A softer snap + gentle outward bow for those
-    # vertices creates a smooth "unfurling" look that matches real behaviour.
-    AXIAL_MIN_DZ     = 25.0   # mm  — minimum z-span to flag as a spine strut
-    AXIAL_MAX_DTHETA = 25.0   # deg — max azimuthal span to be "nearly axial"
-    AXIAL_SNAP_SPEED = 1.0    # linear release for spine struts
-    BOW_FRAC         = 0.15   # bow amplitude as fraction of (deploy_r - crimp_r)
-
-    _npos_cls  = network.node_positions.astype(np.float64)
-    _theta_cls = np.arctan2(_npos_cls[:, 1] - cy, _npos_cls[:, 0] - cx)
-    _edges_cls = list(network.graph.edges())
-    _axial_edge = np.zeros(len(_edges_cls), dtype=bool)
-    for _ei, (_u, _v) in enumerate(_edges_cls):
-        _dz = abs(_npos_cls[_v, 2] - _npos_cls[_u, 2])
-        _dt = abs(np.degrees(np.arctan2(
-            np.sin(_theta_cls[_v] - _theta_cls[_u]),
-            np.cos(_theta_cls[_v] - _theta_cls[_u]))))
-        _axial_edge[_ei] = (_dz >= AXIAL_MIN_DZ) and (_dt <= AXIAL_MAX_DTHETA)
-
-    _lc_cls    = build_vertex_local_coords(mesh, network, cxy)
-    _ei_v      = _lc_cls['edge_idx']            # (V,) vertex→edge assignment
-    is_axial_v = _axial_edge[_ei_v]             # (V,) bool
-    snap_sp_v  = np.where(is_axial_v, AXIAL_SNAP_SPEED, float(snap_speed))
-
-    if verbose:
-        print(f"[deform] Axial spine edges: {int(_axial_edge.sum())}/{len(_edges_cls)}  "
-              f"({int(is_axial_v.sum())} vertices get smooth snap)")
+    # ── Precompute skeleton local coords for deployment reconstruction ────────
+    # Deployment uses skeleton-based reconstruction (smooth strut interpolation)
+    # instead of per-vertex cylindrical.  Build once, reuse every deploy frame.
+    lc_export = build_vertex_local_coords(mesh, network, cxy)
 
     # ── Crown geometry for dwell ──────────────────────────────────────────────
     node_z      = network.node_positions[:, 2]
