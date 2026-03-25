@@ -932,7 +932,7 @@ def main(frames_dir="./frames"):
                        float(player._z.min()), float(player._z.max()))
             tube_setup = True
         if tube_setup:
-            tube.update(panel.cur_frame, player.count - 1)
+            tube.update(player.last_tube_tip_z)
 
         for ev in pygame.event.get():
             if ev.type==QUIT:                                     _quit(panel_tex,player); return
