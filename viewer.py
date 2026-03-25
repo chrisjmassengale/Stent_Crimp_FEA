@@ -316,6 +316,8 @@ class FramePlayer:
         glBufferSubData(GL_ARRAY_BUFFER, 0, data.nbytes, data)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+        self.last_tube_tip_z = float(tube_tip_z)
+
     # ── draw ──────────────────────────────────────────────────────────────────
 
     def draw(self, preview: bool):
