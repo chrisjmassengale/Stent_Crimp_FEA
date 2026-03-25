@@ -528,44 +528,10 @@ def export_frames(mesh: trimesh.Trimesh,
     # instead of per-vertex cylindrical.  Build once, reuse every deploy frame.
     lc_export = build_vertex_local_coords(mesh, network, cxy)
 
-    # ── Crown geometry for dwell ──────────────────────────────────────────────
-    node_z      = network.node_positions[:, 2]
-    z_span_mesh = float(z_orig.max() - z_orig.min())
-
-    cluster_tol = 0.05 * z_span_mesh
-    z_sorted = np.sort(node_z)
-    cluster_centers = [z_sorted[0]]
-    for zv in z_sorted[1:]:
-        if zv - cluster_centers[-1] > cluster_tol:
-            cluster_centers.append(zv)
-        else:
-            cluster_centers[-1] = 0.5 * (cluster_centers[-1] + zv)
-    n_z_levels = len(cluster_centers)
-    n_cells = max(1, (n_z_levels - 1) // 2)
-    crown_arm_length = z_span_mesh / (2.0 * n_cells)
-    cell_height = 2.0 * crown_arm_length
-
-    # Per-vertex dwell (cylindrical path)
-    z_in_cell        = (z_orig - float(z_orig.min())) % cell_height
-    crown_proximity  = 2.0 * np.abs(z_in_cell / cell_height - 0.5)
-    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
-
-    # ── Precompute minimum effective-Z (used to ensure full bottom release) ─────
-    # The dwell mechanism subtracts a per-vertex/node offset from Z before
-    # computing the tube-tip release condition.  The tube tip must travel to
-    # (z_eff_min - trans_len) to fully release the element with the lowest
-    # effective Z.  We compute this once so the tube_tip_z formula can scale
-    # z_front=0..1 to cover exactly that full range.
-    _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
-
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
-        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm, "
-              f"max_dwell={crown_arm_length * crown_dwell:.2f} mm")
-        print(f"[deform] Transition={transition_frac:.2f}  snap={snap_speed:.1f}  "
-              f"dwell={crown_dwell:.2f}  expansion_exp={expansion_exponent:.2f}")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
