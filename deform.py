@@ -207,14 +207,16 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     """
     STEP 1 VALIDATION
 
-    Picks the strut with the most mesh vertices, measures its cross-section
-    WIDTH (n_hat direction) at t=0.25, 0.50, 0.75 along the strut in four states:
+    Selects the most geometrically compact strut (edge whose assigned vertices
+    cluster tightest around the centreline) and measures its cross-section WIDTH
+    (n_hat direction) at t=0.25, 0.50, 0.75 along the strut in four states:
       Natural state / Full crimp / Mid deployment / Full deployment
 
-    All widths must agree to within 0.01 mm.
-    Also shows what the OLD cylindrical method gives for full crimp (for contrast).
+    Only vertices within PROX_THRESH of the centreline are used so we measure a
+    single cross-section, not a broad sweep of the mesh surface.
 
-    Prints results to console.  Returns True if validation passes.
+    All widths must agree to within 0.01 mm.  Prints results to console.
+    Returns True if validation passes.
     """
     SEP = "=" * 64
     print(); print(SEP)
@@ -229,26 +231,58 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     edges    = lc['edges']
     edge_idx = lc['edge_idx']
     t_param  = lc['t_param']
+    r_comp   = lc['r_comp']
+    n_comp   = lc['n_comp']
     V        = len(edge_idx)
     print(f"[validate] {V} vertices → {len(edges)} edges")
 
-    # ── Choose the strut with the most vertices ───────────────────────────────
-    counts   = np.bincount(edge_idx, minlength=len(edges))
-    best_ei  = int(np.argmax(counts))
-    u, v     = edges[best_ei]
+    # ── Radial distance from centreline in the cross-section plane ────────────
+    cs_dist = np.sqrt(r_comp**2 + n_comp**2)   # (V,)
+
+    # ── Select most-compact strut ─────────────────────────────────────────────
+    # For every edge compute the 80th-percentile cs_dist of its assigned vertices.
+    # The edge with the SMALLEST value has the most tightly-bound assignment
+    # (i.e. its vertices are genuinely on that strut's cross-section).
     npos_nat = network.node_positions.astype(np.float64)
-    seg_nat  = npos_nat[v] - npos_nat[u]
+    MIN_VERTS_FOR_CANDIDATE = 8
+    edge_p80 = np.full(len(edges), np.inf)
+    for ei_cand in range(len(edges)):
+        m_cand = edge_idx == ei_cand
+        if m_cand.sum() < MIN_VERTS_FOR_CANDIDATE:
+            continue
+        edge_p80[ei_cand] = float(np.percentile(cs_dist[m_cand], 80))
+
+    best_ei     = int(np.argmin(edge_p80))
+    PROX_THRESH = edge_p80[best_ei] * 1.5     # generous: 1.5× the p80 value
+
+    u, v        = edges[best_ei]
+    seg_nat     = npos_nat[v] - npos_nat[u]
     seg_len_nat = float(np.linalg.norm(seg_nat))
-    print(f"[validate] Strut: edge {best_ei} (nodes {u}→{v}), "
-          f"natural length = {seg_len_nat:.3f} mm, "
-          f"{counts[best_ei]} vertices assigned")
+    all_on_edge = edge_idx == best_ei
+    close_mask  = all_on_edge & (cs_dist < PROX_THRESH)   # ← proximity filter
+    n_close     = int(close_mask.sum())
+
+    print(f"[validate] Chosen strut: edge {best_ei} (nodes {u}→{v}), "
+          f"natural length = {seg_len_nat:.3f} mm")
+    print(f"[validate] Proximity threshold = {PROX_THRESH:.4f} mm  "
+          f"({n_close} of {int(all_on_edge.sum())} assigned vertices pass)")
+
+    if n_close < 4:
+        print("[validate] Too few vertices in proximity window — skipping validation.")
+        print(SEP); print()
+        return False
+
+    t_s = t_param[close_mask]   # (K,) t_params of close vertices
+
+    # Report natural cross-section dimensions
+    r_on = r_comp[close_mask]; n_on = n_comp[close_mask]
+    print(f"[validate] Natural cross-section  "
+          f"width (n_hat) = {n_on.max()-n_on.min():.4f} mm  "
+          f"thick (r_hat) = {r_on.max()-r_on.min():.4f} mm")
     print()
 
-    mask = edge_idx == best_ei
-    t_s  = t_param[mask]           # (K,) t_param for strut vertices
-
     t_positions = [0.25, 0.50, 0.75]
-    window      = 0.15             # ± half-window in t_param
+    window      = 0.15   # ± half-window in t_param
 
     # ── Deformation states ────────────────────────────────────────────────────
     n_crimp = sum(1 for m in solver_meta if m['type'] == 'crimp')
@@ -265,15 +299,15 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
           f"{'t=0.75 (mm)':>12}  {'pass?':>6}")
     print(f"  {'-'*14}  {'-'*12}  {'-'*12}  {'-'*12}  {'-'*6}")
 
-    all_widths  = []
-    nat_widths  = None
+    all_widths = []
+    nat_widths = None
 
-    def _measure_widths(verts_on_strut, node_pos_state):
-        """Measure n_hat widths at each t_position for one state."""
-        npos = node_pos_state.astype(np.float64)
-        a    = npos[u]; b = npos[v]
-        seg  = b - a
-        sl   = max(float(np.linalg.norm(seg)), 1e-10)
+    def _measure_widths(verts_close, node_pos_state):
+        """Measure n_hat width at each t_position for the given deformed vertices."""
+        npos  = node_pos_state.astype(np.float64)
+        a     = npos[u]; b = npos[v]
+        seg   = b - a
+        sl    = max(float(np.linalg.norm(seg)), 1e-10)
         t_hat = seg / sl
         ws = []
         for t_pos in t_positions:
@@ -281,23 +315,23 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
             if in_win.sum() < 2:
                 ws.append(float('nan'))
                 continue
-            cp         = a + t_pos * seg
-            _, n_hat   = _local_frame_at(cp, t_hat, cx, cy)
-            delta      = verts_on_strut[in_win].astype(np.float64) - cp[None, :]
-            n_vals     = delta @ n_hat
+            cp        = a + t_pos * seg
+            _, n_hat  = _local_frame_at(cp, t_hat, cx, cy)
+            delta     = verts_close[in_win].astype(np.float64) - cp[None, :]
+            n_vals    = delta @ n_hat
             ws.append(float(n_vals.max() - n_vals.min()))
         return ws
 
     for label, fi in states:
         if fi is None:
-            verts_s      = mesh.vertices[mask]
-            node_pos_st  = npos_nat
+            verts_c     = mesh.vertices[close_mask]
+            node_pos_st = npos_nat
         else:
-            all_v        = reconstruct_vertices_from_local_coords(lc, solver_frames[fi])
-            verts_s      = all_v[mask]
-            node_pos_st  = solver_frames[fi]
+            all_v       = reconstruct_vertices_from_local_coords(lc, solver_frames[fi])
+            verts_c     = all_v[close_mask]
+            node_pos_st = solver_frames[fi]
 
-        ws = _measure_widths(verts_s, node_pos_st)
+        ws = _measure_widths(verts_c, node_pos_st)
         all_widths.append(ws)
         if fi is None:
             nat_widths = ws
@@ -305,12 +339,10 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
         if fi is None:
             flag = "  ref"
         else:
-            ref_valid = [nat_widths[i] for i in range(3)
-                         if not np.isnan(nat_widths[i]) and not np.isnan(ws[i])]
-            ws_valid  = [ws[i] for i in range(3)
-                         if not np.isnan(nat_widths[i]) and not np.isnan(ws[i])]
-            diffs = [abs(w - r) for w, r in zip(ws_valid, ref_valid)]
-            flag  = " ✓ ok" if all(d < 0.01 for d in diffs) else " ✗ FAIL"
+            diffs = [abs(ws[i] - nat_widths[i])
+                     for i in range(3)
+                     if not np.isnan(ws[i]) and not np.isnan(nat_widths[i])]
+            flag  = " ✓ ok" if diffs and all(d < 0.01 for d in diffs) else " ✗ FAIL"
 
         row = "  ".join(f"{w:>12.4f}" if not np.isnan(w) else f"{'N/A':>12}" for w in ws)
         print(f"  {label:<14}  {row}  {flag}")
@@ -318,18 +350,15 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     # ── OLD method comparison (full crimp only) ───────────────────────────────
     print()
     print("  Old cylindrical method for comparison (full crimp):")
-    fi_crimp     = n_crimp - 1
-    meta_c       = solver_meta[fi_crimp]
-    scale_c      = float(meta_c['scale'])
-    verts_orig   = mesh.vertices.astype(np.float64)
-    cyl_verts    = verts_orig.copy()
-    cyl_verts[:, 0] = cx + (verts_orig[:, 0] - cx) * scale_c
-    cyl_verts[:, 1] = cy + (verts_orig[:, 1] - cy) * scale_c
-    # Z unchanged
-    ws_old = _measure_widths(cyl_verts[mask], solver_frames[fi_crimp])
-    row_old = "  ".join(f"{w:>12.4f}" if not np.isnan(w) else f"{'N/A':>12}"
-                        for w in ws_old)
-    print(f"  {'Cyl (old)':<14}  {row_old}  (should differ from natural)")
+    fi_crimp  = n_crimp - 1
+    scale_c   = float(solver_meta[fi_crimp]['scale'])
+    v_orig    = mesh.vertices.astype(np.float64)
+    cyl_v     = v_orig.copy()
+    cyl_v[:, 0] = cx + (v_orig[:, 0] - cx) * scale_c
+    cyl_v[:, 1] = cy + (v_orig[:, 1] - cy) * scale_c
+    ws_old = _measure_widths(cyl_v[close_mask], solver_frames[fi_crimp])
+    row_old = "  ".join(f"{w:>12.4f}" if not np.isnan(w) else f"{'N/A':>12}" for w in ws_old)
+    print(f"  {'Cyl (old)':<14}  {row_old}  (cylindrical scaling shrinks cross-section)")
 
     # ── Pass / fail ───────────────────────────────────────────────────────────
     passed = True
@@ -339,9 +368,8 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
         if np.isnan(ref):
             continue
         for si, (label, fi) in enumerate(states[1:], 1):
-            w = all_widths[si][ti]
-            if np.isnan(w):
-                continue
+            w    = all_widths[si][ti]
+            if np.isnan(w): continue
             diff = abs(w - ref)
             if diff >= 0.01:
                 passed = False
