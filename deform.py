@@ -641,6 +641,27 @@ def export_frames(mesh: trimesh.Trimesh,
         cyl_verts[:, 1] = cy + r_new * np.sin(theta)
         cyl_verts[:, 2] = z_new
 
+        # DEBUG: first frame only
+        if idx == 0:
+            lf_r = np.sqrt((lf_verts[:, 0] - cx)**2 + (lf_verts[:, 1] - cy)**2)
+            cy_r = np.sqrt((cyl_verts[:, 0] - cx)**2 + (cyl_verts[:, 1] - cy)**2)
+            print(f"[DEBUG frame0] lf_verts R: min={lf_r[use_local].min():.2f}  "
+                  f"max={lf_r[use_local].max():.2f}  "
+                  f"mean={lf_r[use_local].mean():.2f}")
+            print(f"[DEBUG frame0] cyl_verts R: min={cy_r[~use_local].min():.2f}  "
+                  f"max={cy_r[~use_local].max():.2f}  "
+                  f"mean={cy_r[~use_local].mean():.2f}")
+            print(f"[DEBUG frame0] lf Z: min={lf_verts[use_local, 2].min():.2f}  "
+                  f"max={lf_verts[use_local, 2].max():.2f}")
+            print(f"[DEBUG frame0] expected crimp R ≈ {fm['crimp_r']:.2f}  scale={fm['scale']:.4f}")
+            # Check a few large-offset lf verts
+            lf_r_all = np.sqrt((lf_verts[:, 0] - cx)**2 + (lf_verts[:, 1] - cy)**2)
+            worst = np.where(use_local)[0][np.argsort(lf_r_all[use_local])[-5:]]
+            for wi in worst:
+                print(f"  lf_verts[{wi}] = {lf_verts[wi]}  "
+                      f"offset={lc['offset'][wi]}  "
+                      f"ei={lc['edge_idx'][wi]}  tp={lc['t_param'][wi]:.3f}")
+
         # Hybrid blend: use local frame where binding is close
         new_verts = np.where(use_local[:, None], lf_verts, cyl_verts)
 
