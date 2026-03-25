@@ -600,10 +600,6 @@ def export_frames(mesh: trimesh.Trimesh,
         # ──────────────────────────────────────────────────────────────────────
         if fm['type'] == 'crimp':
             r_new = r_center * fm['scale'] + r_offset
-            new_verts = np.empty_like(orig)
-            new_verts[:, 0] = cx + r_new * np.cos(theta)
-            new_verts[:, 1] = cy + r_new * np.sin(theta)
-            new_verts[:, 2] = z_orig
 
         # ──────────────────────────────────────────────────────────────────────
         # DEPLOY — cylindrical base + strut-level r override for long axial struts
