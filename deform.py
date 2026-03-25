@@ -324,7 +324,7 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     close_mask  = all_on_edge & (cs_dist < PROX_THRESH)   # ← proximity filter
     n_close     = int(close_mask.sum())
 
-    print(f"[validate] Chosen strut: edge {best_ei} (nodes {u}→{v}), "
+    print(f"[validate] Chosen strut: edge {best_ei} (nodes {u}->{v}), "
           f"natural length = {seg_len_nat:.3f} mm  "
           f"t_span={edge_t_span[best_ei]:.3f} (thresh={used_t_thresh:.2f})")
     print(f"[validate] Proximity threshold = {PROX_THRESH:.4f} mm  "
