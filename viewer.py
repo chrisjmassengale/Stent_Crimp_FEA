@@ -393,10 +393,9 @@ class DeliveryTube:
         self._tube_bot = z_min
         self._ready = True
 
-    def update(self, frame_idx, n_frames):
-        t = frame_idx / max(n_frames, 1)
-        self._tube_top = self._z_max - t * self._z_span   # open end tracks front
-        self._tube_bot = self._tube_top - self._z_span    # rigid body translation
+    def update(self, tube_tip_z):
+        self._tube_top = tube_tip_z
+        self._tube_bot = tube_tip_z - self._z_span
 
     def draw(self):
         if not self._ready:
