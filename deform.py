@@ -64,121 +64,108 @@ def _local_frame_at(cp, t_hat, cx, cy):
 
 def build_vertex_local_coords(mesh, network, center_xy):
     """
-    For every mesh vertex find the nearest point on any strut centreline
-    segment and express that vertex in the strut's local frame.
+    For every mesh vertex find the nearest point on the DENSIFIED strut
+    centreline skeleton and store the 3D world-space offset from that point.
 
-    Fully vectorised: O(V × E) but with numpy inner loops, typically < 1 s.
+    Densifies each skeleton edge to < MAX_DENSE_SEG_LEN mm before binding so
+    neighbouring struts (mm apart) cannot steal vertices from each other.
+    Uses a KD-tree on segment midpoints for fast candidate lookup.
 
     Returns
     -------
     dict with keys
-      edges    : list[(u,v)]      E edge tuples
-      edge_idx : (V,) int32       which edge owns each vertex
-      t_param  : (V,) float64     position in [0,1] along that edge
-      r_comp   : (V,) float64     thickness offset  (r_hat direction)
-      n_comp   : (V,) float64     width offset      (n_hat direction)
-      t_comp   : (V,) float64     along-strut offset
-      cx, cy   : float
+      edges       : list[(u,v)]    E original edge tuples
+      npos_nat    : (N_nodes, 3)   natural skeleton node positions
+      edge_idx    : (V,) int32     which original edge owns each vertex
+      t_param     : (V,) float64   position in [0,1] along original edge
+      offset      : (V, 3) float64 world-space offset: vertex − centreline_nat
+      r_comp      : (V,) float64   thickness component (validation compat)
+      n_comp      : (V,) float64   width component     (validation compat)
+      t_comp      : (V,) float64   along-strut component
+      max_bind_dist : float        max |offset| across all vertices
+      cx, cy      : float
     """
-    verts    = mesh.vertices.astype(np.float64)        # (V, 3)
-    V        = len(verts)
-    edges    = list(network.graph.edges())             # E tuples
-    E        = len(edges)
-    npos     = network.node_positions.astype(np.float64)  # (N_nodes, 3)
-    cx, cy   = float(center_xy[0]), float(center_xy[1])
+    from scipy.spatial import cKDTree
 
-    seg_a      = np.array([npos[u] for u, v in edges])   # (E, 3)
-    seg_b      = np.array([npos[v] for u, v in edges])   # (E, 3)
-    seg_d      = seg_b - seg_a                            # (E, 3)
-    seg_len    = np.linalg.norm(seg_d, axis=1)            # (E,)
-    seg_t_hat  = seg_d / np.maximum(seg_len, 1e-10)[:, None]  # (E, 3)
+    MAX_DENSE_SEG_LEN = 0.3   # mm — must be << strut spacing (several mm)
 
-    # ── Vectorised nearest-point-on-segment for ALL (V, E) pairs ─────────────
-    # ap[v, e] = verts[v] - seg_a[e],  shape (V, E, 3)
-    ap    = verts[:, None, :] - seg_a[None, :, :]             # (V, E, 3)
-    # Projection length along each segment (not yet clamped)
-    proj  = np.einsum('ijk,jk->ij', ap, seg_t_hat)            # (V, E)
-    # Clamp to [0, seg_len]
-    t_raw = np.clip(proj, 0.0, seg_len[None, :])              # (V, E)
-    # Nearest point on each segment
-    near  = seg_a[None, :, :] + t_raw[:, :, None] * seg_t_hat[None, :, :]  # (V, E, 3)
-    dist2 = np.einsum('ijk,ijk->ij', verts[:, None, :] - near,
-                                     verts[:, None, :] - near)              # (V, E)
+    verts  = mesh.vertices.astype(np.float64)
+    V      = len(verts)
+    edges  = list(network.graph.edges())
+    E      = len(edges)
+    npos   = network.node_positions.astype(np.float64)
+    cx, cy = float(center_xy[0]), float(center_xy[1])
 
-    # Best edge per vertex
-    ei    = np.argmin(dist2, axis=1)                           # (V,)
-    vi    = np.arange(V)
-    t_abs = t_raw[vi, ei]                                      # (V,) absolute t along edge
-    cp    = near[vi, ei]                                       # (V, 3) centreline points
-    th    = seg_t_hat[ei]                                      # (V, 3) strut tangents
+    # ── Step 1: Densify each skeleton edge ────────────────────────────────────
+    d_a_list, d_b_list, d_orig, d_ta, d_tb = [], [], [], [], []
+    for ei, (u, v) in enumerate(edges):
+        seg   = npos[v] - npos[u]
+        seg_l = float(np.linalg.norm(seg))
+        n_sub = max(1, int(np.ceil(seg_l / MAX_DENSE_SEG_LEN)))
+        ts    = np.linspace(0.0, 1.0, n_sub + 1)
+        for k in range(n_sub):
+            ta, tb = float(ts[k]), float(ts[k + 1])
+            d_a_list.append(npos[u] + ta * seg)
+            d_b_list.append(npos[u] + tb * seg)
+            d_orig.append(ei)
+            d_ta.append(ta)
+            d_tb.append(tb)
 
-    # ── Per-vertex local frames (vectorised) ──────────────────────────────────
-    dr     = cp[:, :2] - np.array([[cx, cy]])                 # (V, 2)
-    dr_len = np.linalg.norm(dr, axis=1)                       # (V,)
-    r_w2   = np.where(dr_len[:, None] > 1e-10,
-                      dr / np.maximum(dr_len[:, None], 1e-10),
-                      np.array([[1., 0.]]))                   # (V, 2)
-    r_world = np.hstack([r_w2, np.zeros((V, 1))])             # (V, 3)
+    dseg_a = np.array(d_a_list, dtype=np.float64)   # (D, 3)
+    dseg_b = np.array(d_b_list, dtype=np.float64)   # (D, 3)
+    d_orig = np.array(d_orig,   dtype=np.int32)      # (D,)
+    d_ta   = np.array(d_ta,     dtype=np.float64)    # (D,)
+    d_tb   = np.array(d_tb,     dtype=np.float64)    # (D,)
+    D      = len(dseg_a)
 
-    n_hat  = np.cross(th, r_world)                            # (V, 3)
-    n_len  = np.linalg.norm(n_hat, axis=1)
-    radial = n_len < 1e-10
-    if radial.any():
-        z3                = np.zeros((V, 3)); z3[:, 2] = 1.
-        n_hat[radial]     = np.cross(th[radial], z3[radial])
-        n_len             = np.linalg.norm(n_hat, axis=1)
-    n_hat /= np.maximum(n_len, 1e-10)[:, None]
+    print(f"[bind] Dense skeleton: {D} segs from {E} orig edges "
+          f"(max_len={MAX_DENSE_SEG_LEN:.2f} mm)")
 
-    r_hat  = np.cross(n_hat, th)                              # (V, 3)
-    r_hat /= np.maximum(np.linalg.norm(r_hat, axis=1), 1e-10)[:, None]
+    # ── Step 2: KD-tree on segment midpoints, query K candidates per vertex ───
+    seg_mid     = 0.5 * (dseg_a + dseg_b)
+    tree        = cKDTree(seg_mid)
+    K_CAND      = min(16, D)
+    _, idx_cand = tree.query(verts, k=K_CAND)        # (V, K_CAND)
 
-    # ── Local coordinates ─────────────────────────────────────────────────────
-    delta  = verts - cp                                        # (V, 3)
-    t_comp = np.einsum('ij,ij->i', delta, th)
-    n_comp = np.einsum('ij,ij->i', delta, n_hat)
-    r_comp = np.einsum('ij,ij->i', delta, r_hat)
-    t_param = t_abs / np.maximum(seg_len[ei], 1e-10)          # normalise → [0,1]
+    # ── Step 3: Exact dist to each candidate → pick nearest ──────────────────
+    best_dist2      = np.full(V, np.inf)
+    best_ds         = np.zeros(V, dtype=np.int32)
+    best_t_in_dense = np.zeros(V, dtype=np.float64)
 
-    return {
-        'edges':    edges,
-        'edge_idx': ei.astype(np.int32),
-        't_param':  t_param,
-        'r_comp':   r_comp,
-        'n_comp':   n_comp,
-        't_comp':   t_comp,
-        'cx': cx, 'cy': cy,
-    }
+    for ki in range(K_CAND):
+        ds  = idx_cand[:, ki]
+        a   = dseg_a[ds]
+        b   = dseg_b[ds]
+        ab  = b - a
+        ab2 = np.einsum('ij,ij->i', ab, ab)
+        t_r = np.einsum('ij,ij->i', verts - a, ab) / np.maximum(ab2, 1e-20)
+        t_c = np.clip(t_r, 0.0, 1.0)
+        cl  = a + t_c[:, None] * ab
+        d2  = np.einsum('ij,ij->i', verts - cl, verts - cl)
+        upd = d2 < best_dist2
+        best_dist2[upd]      = d2[upd]
+        best_ds[upd]         = ds[upd]
+        best_t_in_dense[upd] = t_c[upd]
 
+    # ── Step 4: Map dense assignment back to original edge + t_param ──────────
+    ei_v      = d_orig[best_ds]
+    t_in_orig = d_ta[best_ds] + best_t_in_dense * (d_tb[best_ds] - d_ta[best_ds])
 
-def reconstruct_vertices_from_local_coords(lc, node_positions):
-    """
-    Rebuild world-space vertex positions from local-frame offsets and
-    the deformed beam-node positions.
-
-    lc             : dict returned by build_vertex_local_coords()
-    node_positions : (N_nodes, 3) array of deformed skeleton positions
-    """
-    edges  = lc['edges']
-    cx, cy = lc['cx'], lc['cy']
-    npos   = np.asarray(node_positions, dtype=np.float64)
-
-    seg_a  = np.array([npos[u] for u, v in edges])
-    seg_b  = np.array([npos[v] for u, v in edges])
-    seg_d  = seg_b - seg_a
-    seg_len = np.linalg.norm(seg_d, axis=1)
+    # ── Step 5: Natural-state centreline points and offsets ──────────────────
+    seg_a     = np.array([npos[u] for u, v in edges])
+    seg_b     = np.array([npos[v] for u, v in edges])
+    seg_d     = seg_b - seg_a
+    seg_len   = np.linalg.norm(seg_d, axis=1)
     seg_t_hat = seg_d / np.maximum(seg_len, 1e-10)[:, None]
 
-    ei = lc['edge_idx']
-    tp = lc['t_param']
-    rc = lc['r_comp']
-    nc = lc['n_comp']
-    tc = lc['t_comp']
-    V  = len(ei)
+    cp_nat  = seg_a[ei_v] + t_in_orig[:, None] * seg_d[ei_v]
+    offsets = verts - cp_nat                                     # (V, 3)
 
-    cp = seg_a[ei] + (tp * seg_len[ei])[:, None] * seg_t_hat[ei]  # (V, 3)
-    th = seg_t_hat[ei]                                              # (V, 3)
+    # ── Step 6: Decompose offsets for validation compatibility ────────────────
+    th     = seg_t_hat[ei_v]
+    t_comp = np.einsum('ij,ij->i', offsets, th)
 
-    dr     = cp[:, :2] - np.array([[cx, cy]])
+    dr     = cp_nat[:, :2] - np.array([[cx, cy]])
     dr_len = np.linalg.norm(dr, axis=1)
     r_w2   = np.where(dr_len[:, None] > 1e-10,
                       dr / np.maximum(dr_len[:, None], 1e-10),
@@ -193,13 +180,91 @@ def reconstruct_vertices_from_local_coords(lc, node_positions):
         n_hat[radial] = np.cross(th[radial], z3[radial])
         n_len = np.linalg.norm(n_hat, axis=1)
     n_hat /= np.maximum(n_len, 1e-10)[:, None]
-
     r_hat  = np.cross(n_hat, th)
     r_hat /= np.maximum(np.linalg.norm(r_hat, axis=1), 1e-10)[:, None]
 
-    return (cp + rc[:, None] * r_hat
-               + nc[:, None] * n_hat
-               + tc[:, None] * th).astype(np.float32)
+    r_comp = np.einsum('ij,ij->i', offsets, r_hat)
+    n_comp = np.einsum('ij,ij->i', offsets, n_hat)
+
+    # ── Binding quality report ────────────────────────────────────────────────
+    dist_cl = np.sqrt(best_dist2)
+    max_bd  = float(dist_cl.max())
+    print(f"[bind] Binding: max={max_bd:.3f} mm  mean={dist_cl.mean():.3f} mm  "
+          f">1 mm: {(dist_cl > 1.0).sum()}  >0.5 mm: {(dist_cl > 0.5).sum()}")
+    if max_bd > 1.0:
+        print(f"[bind] WARNING: {(dist_cl > 1.0).sum()} vertices bound > 1 mm from "
+              "centreline — reduce MAX_DENSE_SEG_LEN if this number is large")
+
+    return {
+        'edges':         edges,
+        'npos_nat':      npos.copy(),
+        'edge_idx':      ei_v.astype(np.int32),
+        't_param':       t_in_orig,
+        'offset':        offsets,
+        'r_comp':        r_comp,
+        'n_comp':        n_comp,
+        't_comp':        t_comp,
+        'max_bind_dist': max_bd,
+        'cx': cx, 'cy': cy,
+    }
+
+
+def reconstruct_vertices_from_local_coords(lc, node_positions):
+    """
+    Rebuild world-space vertex positions using Rodrigues rotation of the
+    natural-state 3D offset (vertex − centreline_nat).
+
+    The rotation R maps the natural strut tangent → deformed strut tangent,
+    rigidly rotating the cross-section so its shape is exactly preserved.
+
+    lc             : dict returned by build_vertex_local_coords()
+    node_positions : (N_nodes, 3) deformed skeleton node positions
+    """
+    edges    = lc['edges']
+    npos_nat = lc['npos_nat']
+    npos_def = np.asarray(node_positions, dtype=np.float64)
+
+    # Natural skeleton geometry
+    seg_a_n   = np.array([npos_nat[u] for u, v in edges])
+    seg_b_n   = np.array([npos_nat[v] for u, v in edges])
+    seg_d_n   = seg_b_n - seg_a_n
+    seg_len_n = np.linalg.norm(seg_d_n, axis=1)
+    t_hat_n   = seg_d_n / np.maximum(seg_len_n, 1e-10)[:, None]  # (E, 3)
+
+    # Deformed skeleton geometry
+    seg_a_d   = np.array([npos_def[u] for u, v in edges])
+    seg_b_d   = np.array([npos_def[v] for u, v in edges])
+    seg_d_d   = seg_b_d - seg_a_d
+    seg_len_d = np.linalg.norm(seg_d_d, axis=1)
+    t_hat_d   = seg_d_d / np.maximum(seg_len_d, 1e-10)[:, None]  # (E, 3)
+
+    ei      = lc['edge_idx']
+    tp      = lc['t_param']
+    offsets = lc['offset']          # (V, 3) natural-state offsets
+
+    # Deformed centreline points
+    cp_def = seg_a_d[ei] + (tp * seg_len_d[ei])[:, None] * t_hat_d[ei]
+
+    # Per-vertex natural and deformed tangents
+    tn = t_hat_n[ei]                # (V, 3)
+    td = t_hat_d[ei]                # (V, 3)
+
+    # Rodrigues rotation: rotate offset by R(tn → td)
+    # R·v = v·cos + (k×v)·sin + k·(k·v)·(1−cos),  k = axis/|axis|
+    axis      = np.cross(tn, td)                               # (V, 3)
+    sin_theta = np.linalg.norm(axis, axis=1)                   # (V,)
+    cos_theta = np.einsum('ij,ij->i', tn, td)                  # (V,)
+    k         = axis / np.maximum(sin_theta, 1e-10)[:, None]   # unit rotation axis
+
+    kv      = np.einsum('ij,ij->i', k, offsets)                # k · offset  (V,)
+    rotated = (offsets * cos_theta[:, None]
+               + np.cross(k, offsets) * sin_theta[:, None]
+               + k * kv[:, None] * (1.0 - cos_theta[:, None]))
+
+    # Near-zero rotation: tangent unchanged, offset unchanged
+    rotated[sin_theta < 1e-7] = offsets[sin_theta < 1e-7]
+
+    return (cp_def + rotated).astype(np.float32)
 
 
 def validate_cross_section_preservation(mesh, network, solver_frames, solver_meta,
