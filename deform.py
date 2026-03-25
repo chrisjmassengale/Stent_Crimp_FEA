@@ -561,8 +561,6 @@ def export_frames(mesh: trimesh.Trimesh,
               f"max_dwell={crown_arm_length * crown_dwell:.2f} mm")
         print(f"[deform] Transition={transition_frac:.2f}  snap={snap_speed:.1f}  "
               f"dwell={crown_dwell:.2f}  expansion_exp={expansion_exponent:.2f}")
-        print(f"[deform] Hybrid: {use_local.sum()} strut verts (local-frame) + "
-              f"{(~use_local).sum()} body verts (cylindrical)")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
