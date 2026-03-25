@@ -545,11 +545,6 @@ def export_frames(mesh: trimesh.Trimesh,
     crown_proximity  = 2.0 * np.abs(z_in_cell / cell_height - 0.5)
     dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
 
-    # Per-node dwell (local-frame path)
-    n_z_in_cell   = (node_z_vals - float(node_z_vals.min())) % cell_height
-    node_crown_prox = 2.0 * np.abs(n_z_in_cell / cell_height - 0.5)
-    node_dwell      = crown_arm_length * crown_dwell * node_crown_prox
-
     # ── Precompute minimum effective-Z (used to ensure full bottom release) ─────
     # The dwell mechanism subtracts a per-vertex/node offset from Z before
     # computing the tube-tip release condition.  The tube tip must travel to
