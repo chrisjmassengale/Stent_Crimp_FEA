@@ -928,8 +928,9 @@ def main(frames_dir="./frames"):
         # Ensure anchors loaded (needs GL context, done lazily)
         player.ensure_ready()
         if player._gl_ready and not tube_setup:
-            tube.setup(player._cx, player._cy,
-                       float(player._z.min()), float(player._z.max()))
+            z_min_t = float(player._z.min()); z_max_t = float(player._z.max())
+            tube.setup(player._cx, player._cy, z_min_t, z_max_t)
+            player.last_tube_tip_z = z_max_t   # tube starts above stent
             tube_setup = True
         if tube_setup:
             tube.update(player.last_tube_tip_z)
