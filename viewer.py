@@ -181,9 +181,10 @@ class FramePlayer:
         v1  = m1.vertices.astype(np.float64)
         f   = m0.faces.astype(np.int32)
 
-        # Axis centre from crimped frame
-        cx  = float(np.median(v0[:, 0]))
-        cy  = float(np.median(v0[:, 1]))
+        # Axis centre: bounding-box midpoint of the deployed frame is the most
+        # symmetric estimate (matches solver.py's geometric centre).
+        cx  = float(0.5 * (v1[:, 0].min() + v1[:, 0].max()))
+        cy  = float(0.5 * (v1[:, 1].min() + v1[:, 1].max()))
         self._cx, self._cy = cx, cy
 
         dx  = v0[:, 0] - cx;  dy = v0[:, 1] - cy
@@ -194,6 +195,22 @@ class FramePlayer:
         self._r_center = float(np.median(r0))
         self._r_offset = (r0 - self._r_center).astype(np.float32)
         self._faces    = f
+
+        # ── Per-vertex axial strut classification ─────────────────────────────
+        # Detect vertices on long nearly-axial struts via local theta variation.
+        # Circular std of theta across nearest neighbours: low → axial strut.
+        try:
+            from scipy.spatial import cKDTree as _KDT
+            _tree  = _KDT(v0)
+            _, _nb = _tree.query(v0, k=14)
+            _th_nb = self._theta[_nb].astype(np.float64)
+            _s_m   = np.sin(_th_nb).mean(axis=1)
+            _c_m   = np.cos(_th_nb).mean(axis=1)
+            _R     = np.sqrt(_s_m**2 + _c_m**2)
+            _circ_std = np.sqrt(-2.0 * np.log(np.maximum(_R, 1e-8)))
+            self._is_axial = (_circ_std < 0.25).astype(np.float32)  # 0/1 mask
+        except Exception:
+            self._is_axial = None
 
         # Estimate crown cell height from z-value clustering
         z_vals  = np.sort(v0[:, 2])
