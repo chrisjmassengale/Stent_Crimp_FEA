@@ -451,7 +451,7 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
                       f"width={w:.4f}  ref={ref:.4f}  diff={diff:.4f} mm")
 
     print()
-    print(f"Result: {'PASSED ✓' if passed else 'FAILED ✗'}")
+    print(f"Result: {'PASSED' if passed else 'FAILED'}")
     print(SEP); print()
     return passed
 
