@@ -209,6 +209,10 @@ def main():
     print(f"  Generated {total_frames} frames")
     print()
 
+    # Step 2b: Validate cross-section frame preservation BEFORE writing any frames.
+    from deform import validate_cross_section_preservation
+    validate_cross_section_preservation(mesh, network, frames, meta, verbose=True)
+
     # Step 3: Reorder and resample to exactly 100 frames.
     # frames[0..n_crimp-1]     = crimping   (deployed → fully crimped)
     # frames[n_crimp..total-1] = deployment (crimped  → fully deployed)
