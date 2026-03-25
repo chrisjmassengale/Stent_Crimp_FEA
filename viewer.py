@@ -141,6 +141,7 @@ class FramePlayer:
         self._last_key   = None
         self._last_deform_t = 0.
         self.last_tube_tip_z = 0.
+        self._axial_strut_data = []   # filled in _load_anchors via skeleton
         self._scan()
 
     # ── file management ───────────────────────────────────────────────────────
