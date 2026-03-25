@@ -571,6 +571,16 @@ def export_frames(mesh: trimesh.Trimesh,
     node_crown_prox = 2.0 * np.abs(n_z_in_cell / cell_height - 0.5)
     node_dwell      = crown_arm_length * crown_dwell * node_crown_prox
 
+    # ── Precompute minimum effective-Z (used to ensure full bottom release) ─────
+    # The dwell mechanism subtracts a per-vertex/node offset from Z before
+    # computing the tube-tip release condition.  The tube tip must travel to
+    # (z_eff_min - trans_len) to fully release the element with the lowest
+    # effective Z.  We compute this once so the tube_tip_z formula can scale
+    # z_front=0..1 to cover exactly that full range.
+    _eff_z_v_min = float((z_orig - dwell_per_vertex).min())
+    _eff_z_n_min = float((node_z_vals - node_dwell).min())
+    _deploy_eff_zmin = min(_eff_z_v_min, _eff_z_n_min)
+
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
