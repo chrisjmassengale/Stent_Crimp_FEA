@@ -595,23 +595,9 @@ def export_frames(mesh: trimesh.Trimesh,
             _SNAP_FRAC = 1.0   # snap expansion alone reaches deploy_r;
             t_global   = float(np.clip(z_front, 0., 1.))
 
-            # Local-frame path: per-node release
-            z_eff_n     = node_z_vals - node_dwell
-            released_n  = _smoothstep((z_eff_n - tube_tip_z) / trans_len)
-            snap_n      = _snap_curve(released_n, snap_speed)
-            t_rel_n     = np.clip((z_max - z_eff_n) / max(z_span, 1e-6), 0., 1.)
-            thermal_n   = _smoothstep(np.minimum(
-                              np.clip(t_global - t_rel_n, 0., 1.) * expansion_exponent * 5., 1.))
             r_snap_tgt  = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
-            r_node_tgt  = (crimp_r
-                           + (r_snap_tgt - crimp_r)   * snap_n
-                           + (deploy_r   - r_snap_tgt) * thermal_n * released_n)
-            s_nodes     = np.where(node_r_nat > 1e-8, r_node_tgt / node_r_nat, 1.0)
-            npos_def    = npos_nat.copy()
-            npos_def[:, 0] = cx + node_dx_nat * s_nodes
-            npos_def[:, 1] = cy + node_dy_nat * s_nodes
 
-            # Cylindrical path: per-vertex release
+            # Per-vertex release (cylindrical)
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
