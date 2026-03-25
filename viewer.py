@@ -210,14 +210,13 @@ class FramePlayer:
         self.scale  = 20. / max(ext, 1e-6)
 
         # ── Identify long axial struts via skeleton ───────────────────────────
-        # Same approach as deform.py: bind mesh vertices to skeleton edges,
-        # detect long nearly-axial edges, store masks + z-spans for r_cl override.
+        # Uses the raw (non-welded) deployed frame so vertex indices match v0.
         try:
-            from topology import load_and_extract
+            from topology import extract_skeleton_from_raw_mesh
             from deform import build_vertex_local_coords
-            _, network = load_and_extract(str(self.paths[-1]), verbose=False)
             mesh_dep   = trimesh.load(str(self.paths[-1]), process=False, force='mesh')
             center_xy  = np.array([cx, cy])
+            network    = extract_skeleton_from_raw_mesh(mesh_dep, center_xy)
             lc         = build_vertex_local_coords(mesh_dep, network, center_xy)
             npos       = network.node_positions.astype(np.float64)
             edges      = list(network.graph.edges())
