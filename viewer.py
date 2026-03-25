@@ -141,8 +141,6 @@ class FramePlayer:
         self._last_key   = None
         self._last_deform_t = 0.
         self.last_tube_tip_z = 0.
-        self._is_axial   = None   # per-vertex axial strut mask (set in _load_anchors)
-
         self._scan()
 
     # ── file management ───────────────────────────────────────────────────────
