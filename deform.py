@@ -523,15 +523,68 @@ def export_frames(mesh: trimesh.Trimesh,
     r_center = np.median(r_orig)
     r_offset = r_orig - r_center
 
-    # ── Precompute skeleton local coords for deployment reconstruction ────────
-    # Deployment uses skeleton-based reconstruction (smooth strut interpolation)
-    # instead of per-vertex cylindrical.  Build once, reuse every deploy frame.
+    # ── Skeleton binding — used to identify long axial strut vertices ────────
+    # We use the skeleton purely to find which vertices belong to which strut
+    # edges and at what t_param along the edge.  The binding distances here can
+    # be large; we filter by edge identity + a generous cs_dist cutoff later.
     lc_export = build_vertex_local_coords(mesh, network, cxy)
+
+    # Identify long nearly-axial strut edges (dz large, radial drift small).
+    # For these struts the solver-computed per-node radius already varies
+    # smoothly with the deployment front; we interpolate along the strut
+    # instead of reading each vertex's own z independently.
+    _npos     = network.node_positions.astype(np.float64)
+    _edges    = list(network.graph.edges())
+    _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
+
+    AXIAL_MIN_DZ      = 15.0   # mm — z-span threshold for "long" strut
+    AXIAL_MAX_DXY_RAT = 0.35   # max XY drift / dz ratio to be "nearly axial"
+    AXIAL_BIND_MAX    = 5.0    # mm — max cross-section distance for vertex to qualify
+
+    axial_strut_list = []   # list of dicts: mask, u, v, t_params
+    for ei, (u, v) in enumerate(_edges):
+        dz  = abs(_npos[v, 2] - _npos[u, 2])
+        dxy = float(np.linalg.norm(_npos[v, :2] - _npos[u, :2]))
+        if dz < AXIAL_MIN_DZ or dxy > dz * AXIAL_MAX_DXY_RAT:
+            continue
+        v_mask = (lc_export['edge_idx'] == ei) & (_cs_dist < AXIAL_BIND_MAX)
+        if v_mask.sum() < 8:
+            continue
+        axial_strut_list.append({
+            'mask': v_mask,
+            'u':    u,
+            'v':    v,
+            't':    lc_export['t_param'][v_mask],
+        })
+
+    # ── Crown geometry for dwell ──────────────────────────────────────────────
+    node_z      = network.node_positions[:, 2]
+    z_span_mesh = float(z_orig.max() - z_orig.min())
+    cluster_tol = 0.05 * z_span_mesh
+    z_sorted = np.sort(node_z)
+    cluster_centers = [float(z_sorted[0])]
+    for zv in z_sorted[1:]:
+        if zv - cluster_centers[-1] > cluster_tol:
+            cluster_centers.append(float(zv))
+        else:
+            cluster_centers[-1] = 0.5 * (cluster_centers[-1] + float(zv))
+    n_cells = max(1, (len(cluster_centers) - 1) // 2)
+    crown_arm_length = z_span_mesh / (2.0 * n_cells)
+    cell_height = 2.0 * crown_arm_length
+
+    z_in_cell        = (z_orig - float(z_orig.min())) % cell_height
+    crown_proximity  = 2.0 * np.abs(z_in_cell / cell_height - 0.5)
+    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
+    _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
 
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
+        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm")
+        print(f"[deform] Long axial struts: {len(axial_strut_list)}  "
+              f"({sum(d['mask'].sum() for d in axial_strut_list)} vertices "
+              "get strut-level r interpolation)")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
@@ -553,16 +606,42 @@ def export_frames(mesh: trimesh.Trimesh,
             new_verts[:, 2] = z_orig
 
         # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY — skeleton-based strut interpolation
+        # DEPLOY — cylindrical base + strut-level r override for long axial struts
         # ──────────────────────────────────────────────────────────────────────
         else:
-            # Each vertex is translated by the displacement of its assigned
-            # skeleton centreline point (linear interpolation between the two
-            # solver-computed junction node positions).  Long axial struts
-            # smoothly transition from released (deploy_r) at the top to
-            # constrained (crimp_r) at the bottom — no per-vertex kink.
-            new_verts = reconstruct_vertices_from_local_coords(
-                lc_export, frames[idx]).astype(np.float64)
+            z_min  = fm['z_min'];   z_span = fm['z_span']
+            z_max  = z_min + z_span;  z_front = fm['z_front_norm']
+            trans_len     = transition_frac * z_span
+            deploy_travel = z_max - (_deploy_eff_zmin - trans_len)
+            tube_tip_z    = z_max - z_front * deploy_travel
+            t_global      = float(np.clip(z_front, 0., 1.))
+
+            # Per-vertex cylindrical release
+            z_eff_v    = z_orig - dwell_per_vertex
+            released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
+            snap_v     = _snap_curve(released_v, snap_speed)
+            t_rel_v    = np.clip((z_max - z_eff_v) / max(z_span, 1e-6), 0., 1.)
+            thermal_v  = _smoothstep(np.minimum(
+                             np.clip(t_global - t_rel_v, 0., 1.) * expansion_exponent * 5., 1.))
+            r_cl = (crimp_r
+                    + (deploy_r - crimp_r) * snap_v
+                    + (deploy_r - deploy_r) * thermal_v * released_v)   # snap alone → deploy_r
+
+            # ── Long axial strut override ────────────────────────────────────
+            # Replace per-vertex z-based r_cl with the solver's per-strut radius,
+            # interpolated linearly between the two junction node positions.
+            # This eliminates the kink at the deployment front because each
+            # vertex's r follows the strut's actual release profile, not its
+            # own z position independently.
+            node_pos = frames[idx]   # (N_nodes, 3)
+            for sd in axial_strut_list:
+                p_u = node_pos[sd['u']];  p_v = node_pos[sd['v']]
+                r_u = float(np.sqrt((p_u[0] - cx)**2 + (p_u[1] - cy)**2))
+                r_v = float(np.sqrt((p_v[0] - cx)**2 + (p_v[1] - cy)**2))
+                # Interpolate: t=0 → node u, t=1 → node v
+                r_cl[sd['mask']] = r_u + sd['t'] * (r_v - r_u)
+
+            r_new = r_cl + r_offset
 
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
