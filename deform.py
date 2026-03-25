@@ -630,13 +630,19 @@ def export_frames(mesh: trimesh.Trimesh,
             # Per-vertex release (cylindrical)
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
-            snap_v     = _snap_curve(released_v, snap_speed)
+            # Per-vertex snap: axial spine struts use linear (speed=1) so they
+            # smoothly unfurl; crown/diagonal struts keep the configured speed.
+            snap_v     = 1.0 - (1.0 - released_v) ** snap_sp_v
             t_rel_v    = np.clip((z_max - z_eff_v) / max(z_span, 1e-6), 0., 1.)
             thermal_v  = _smoothstep(np.minimum(
                              np.clip(t_global - t_rel_v, 0., 1.) * expansion_exponent * 5., 1.))
             r_cl       = (crimp_r
                           + (r_snap_tgt - crimp_r)   * snap_v
                           + (deploy_r   - r_snap_tgt) * thermal_v * released_v)
+            # Outward bow for axial struts: bell-shaped push peaks at midpoint
+            # of the transition zone (released_v=0.5), simulating beam bending.
+            r_cl += (np.where(is_axial_v, BOW_FRAC * (deploy_r - crimp_r), 0.0)
+                     * 4.0 * released_v * (1.0 - released_v))
             r_new = r_cl + r_offset
             z_new = z_orig
 
