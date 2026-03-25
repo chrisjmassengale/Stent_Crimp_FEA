@@ -610,7 +610,6 @@ def export_frames(mesh: trimesh.Trimesh,
             trans_len     = transition_frac * z_span
             deploy_travel = z_max - (_deploy_eff_zmin - trans_len)
             tube_tip_z    = z_max - z_front * deploy_travel
-            t_global      = float(np.clip(z_front, 0., 1.))
 
             # Per-vertex cylindrical release
             z_eff_v    = z_orig - dwell_per_vertex
