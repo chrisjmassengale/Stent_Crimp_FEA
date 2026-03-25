@@ -287,20 +287,10 @@ class FramePlayer:
         t_out_v     = np.clip(t - t_release_v, 0., 1.)
         thermal_v   = _smoothstep(np.minimum(t_out_v * exp_e * 5., 1.))
 
-        # Per-vertex snap: axial spine struts get linear release (speed=1)
-        if self._is_axial is not None:
-            _snap_sp_v = self._is_axial * 1.0 + (1.0 - self._is_axial) * snap
-            snap_v = 1.0 - (1.0 - released) ** _snap_sp_v
-        # snap_v already computed above; no change needed for non-axial path
-
         r_snap_tgt  = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
         r_cl  = (crimp_r
                  + (r_snap_tgt - crimp_r)   * snap_v
                  + (deploy_r   - r_snap_tgt) * thermal_v * released)
-        # Outward bow for axial struts (matches deform.py BOW_FRAC=0.15)
-        if self._is_axial is not None:
-            _bow = 0.15 * (deploy_r - crimp_r) * 4.0 * released * (1.0 - released)
-            r_cl = r_cl + self._is_axial * _bow
         r_new = (r_cl + self._r_offset).astype(np.float64)
 
         # ── Back to cartesian ─────────────────────────────────────────────────
