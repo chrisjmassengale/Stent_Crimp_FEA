@@ -140,6 +140,7 @@ class FramePlayer:
         self._gl_ready   = False
         self._last_key   = None
         self._last_deform_t = 0.
+        self.last_tube_tip_z = 0.
 
         self._scan()
 
