@@ -323,6 +323,27 @@ class FramePlayer:
         r_cl  = (crimp_r
                  + (r_snap_tgt - crimp_r)   * snap_v
                  + (deploy_r   - r_snap_tgt) * thermal_v * released)
+
+        # ── Long axial strut override ─────────────────────────────────────────
+        # Replace independent per-vertex z-based r_cl with smooth strut-level
+        # interpolation between the endpoint radii (Hermite S-curve + outward bow).
+        BOW_FRAC = 0.18
+        z_f64 = z  # already float64
+        for sd in self._axial_strut_data:
+            z_top, z_bot = sd['z_top'], sd['z_bot']
+            z_span_s = max(z_top - z_bot, 1e-6)
+            z_sv = z_f64[sd['mask']]
+            r_sv = r_cl[sd['mask']]
+            # r_cl at endpoints: average over vertices near top / bottom
+            top_m = z_sv > z_top - 2.0
+            bot_m = z_sv < z_bot + 2.0
+            r_top = float(r_sv[top_m].mean()) if top_m.any() else float(r_sv.max())
+            r_bot = float(r_sv[bot_m].mean()) if bot_m.any() else float(r_sv.min())
+            t_s = np.clip((z_sv - z_bot) / z_span_s, 0., 1.)
+            t_h = t_s * t_s * (3. - 2. * t_s)   # Hermite smoothstep
+            bow = BOW_FRAC * max(0., r_top - r_bot) * np.sin(np.pi * t_s)
+            r_cl[sd['mask']] = r_bot + (r_top - r_bot) * t_h + bow
+
         r_new = (r_cl + self._r_offset).astype(np.float64)
 
         # ── Back to cartesian ─────────────────────────────────────────────────
