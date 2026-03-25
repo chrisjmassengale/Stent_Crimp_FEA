@@ -269,9 +269,10 @@ class FramePlayer:
         z_eff         = z - dwell_shift
 
         # ── Per-vertex released fraction (smoothstep over transition zone) ────
-        tube_tip_z = z_max - t * z_span
-        trans_len  = tl * z_span
-        released   = _smoothstep((z_eff - tube_tip_z) / max(trans_len, 1e-6))
+        trans_len     = tl * z_span
+        deploy_travel = z_max - (float(z_eff.min()) - trans_len)
+        tube_tip_z    = z_max - t * deploy_travel
+        released      = _smoothstep((z_eff - tube_tip_z) / max(trans_len, 1e-6))
         snap_v     = _snap_curve(released, snap)
 
         # ── Two-phase superelastic deployment ─────────────────────────────────
