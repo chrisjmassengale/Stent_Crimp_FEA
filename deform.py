@@ -276,7 +276,7 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
     r_comp   = lc['r_comp']
     n_comp   = lc['n_comp']
     V        = len(edge_idx)
-    print(f"[validate] {V} vertices → {len(edges)} edges")
+    print(f"[validate] {V} vertices -> {len(edges)} edges")
 
     # ── Radial distance from centreline in the cross-section plane ────────────
     cs_dist = np.sqrt(r_comp**2 + n_comp**2)   # (V,)
