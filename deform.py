@@ -551,9 +551,7 @@ def export_frames(mesh: trimesh.Trimesh,
     # (z_eff_min - trans_len) to fully release the element with the lowest
     # effective Z.  We compute this once so the tube_tip_z formula can scale
     # z_front=0..1 to cover exactly that full range.
-    _eff_z_v_min = float((z_orig - dwell_per_vertex).min())
-    _eff_z_n_min = float((node_z_vals - node_dwell).min())
-    _deploy_eff_zmin = min(_eff_z_v_min, _eff_z_n_min)
+    _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
 
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
