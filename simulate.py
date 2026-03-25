@@ -174,6 +174,35 @@ def main():
     print(f"  Expansion exp    : {args.expansion_exponent}")
     print()
 
+    # ── STL file inspection (runs every time so changes are always visible) ──
+    print("=" * 60)
+    print("STL File Report")
+    print("=" * 60)
+    try:
+        import trimesh as _tm
+        _raw = _tm.load(args.input, process=False, force='mesh')
+        _fsize = os.path.getsize(args.input)
+        _fsize_str = (f"{_fsize/1e6:.2f} MB" if _fsize >= 1e6
+                      else f"{_fsize/1e3:.1f} KB")
+        _ext = _raw.extents
+        _bmin, _bmax = _raw.bounds
+        print(f"  File             : {os.path.abspath(args.input)}")
+        print(f"  File size        : {_fsize_str}  ({_fsize:,} bytes)")
+        print(f"  Vertices (raw)   : {len(_raw.vertices):,}")
+        print(f"  Faces (raw)      : {len(_raw.faces):,}")
+        print(f"  Watertight       : {_raw.is_watertight}")
+        print(f"  Bounds X         : [{_bmin[0]:.3f}, {_bmax[0]:.3f}] mm")
+        print(f"  Bounds Y         : [{_bmin[1]:.3f}, {_bmax[1]:.3f}] mm")
+        print(f"  Bounds Z         : [{_bmin[2]:.3f}, {_bmax[2]:.3f}] mm")
+        print(f"  Extents (X Y Z)  : {_ext[0]:.3f} x {_ext[1]:.3f} x {_ext[2]:.3f} mm")
+        print(f"  Longest axis     : {max(_ext):.3f} mm  "
+              f"({'X' if _ext[0]==max(_ext) else 'Y' if _ext[1]==max(_ext) else 'Z'})")
+        if _raw.is_watertight:
+            print(f"  Volume           : {_raw.volume:.4f} mm^3")
+    except Exception as _e:
+        print(f"  [STL report failed: {_e}]")
+    print()
+
     # Step 1: Topology extraction
     print("[1/4] Extracting beam network from STL...")
     try:
