@@ -211,60 +211,37 @@ def build_vertex_local_coords(mesh, network, center_xy):
 
 def reconstruct_vertices_from_local_coords(lc, node_positions):
     """
-    Rebuild world-space vertex positions using Rodrigues rotation of the
-    natural-state 3D offset (vertex − centreline_nat).
+    Rebuild world-space vertex positions by translating each vertex by its
+    skeleton centreline's displacement:
 
-    The rotation R maps the natural strut tangent → deformed strut tangent,
-    rigidly rotating the cross-section so its shape is exactly preserved.
+        new_vertex = vertex_nat + (cp_def - cp_nat)
+                   = cp_def + offset_nat
+
+    No rotation needed: r_hat direction is preserved by radial deformation,
+    so the natural-state offset is already in the correct frame.  Rodrigues
+    rotation was tried but causes explosions when skeleton tangents change
+    drastically across the deployment release front.
 
     lc             : dict returned by build_vertex_local_coords()
     node_positions : (N_nodes, 3) deformed skeleton node positions
     """
     edges    = lc['edges']
-    npos_nat = lc['npos_nat']
     npos_def = np.asarray(node_positions, dtype=np.float64)
 
-    # Natural skeleton geometry
-    seg_a_n   = np.array([npos_nat[u] for u, v in edges])
-    seg_b_n   = np.array([npos_nat[v] for u, v in edges])
-    seg_d_n   = seg_b_n - seg_a_n
-    seg_len_n = np.linalg.norm(seg_d_n, axis=1)
-    t_hat_n   = seg_d_n / np.maximum(seg_len_n, 1e-10)[:, None]  # (E, 3)
-
     # Deformed skeleton geometry
-    seg_a_d   = np.array([npos_def[u] for u, v in edges])
-    seg_b_d   = np.array([npos_def[v] for u, v in edges])
-    seg_d_d   = seg_b_d - seg_a_d
-    seg_len_d = np.linalg.norm(seg_d_d, axis=1)
-    t_hat_d   = seg_d_d / np.maximum(seg_len_d, 1e-10)[:, None]  # (E, 3)
+    seg_a_d = np.array([npos_def[u] for u, v in edges])   # (E, 3)
+    seg_b_d = np.array([npos_def[v] for u, v in edges])   # (E, 3)
+    seg_d_d = seg_b_d - seg_a_d                            # (E, 3)
 
-    ei      = lc['edge_idx']
-    tp      = lc['t_param']
-    offsets = lc['offset']          # (V, 3) natural-state offsets
+    ei      = lc['edge_idx']   # (V,) int32
+    tp      = lc['t_param']    # (V,) float64  ∈ [0, 1]
+    offsets = lc['offset']     # (V, 3) float64  vertex_nat - cp_nat
 
-    # Deformed centreline points
-    cp_def = seg_a_d[ei] + (tp * seg_len_d[ei])[:, None] * t_hat_d[ei]
+    # Deformed centreline point for each vertex's assigned edge segment
+    cp_def = seg_a_d[ei] + tp[:, None] * seg_d_d[ei]   # (V, 3)
 
-    # Per-vertex natural and deformed tangents
-    tn = t_hat_n[ei]                # (V, 3)
-    td = t_hat_d[ei]                # (V, 3)
-
-    # Rodrigues rotation: rotate offset by R(tn → td)
-    # R·v = v·cos + (k×v)·sin + k·(k·v)·(1−cos),  k = axis/|axis|
-    axis      = np.cross(tn, td)                               # (V, 3)
-    sin_theta = np.linalg.norm(axis, axis=1)                   # (V,)
-    cos_theta = np.einsum('ij,ij->i', tn, td)                  # (V,)
-    k         = axis / np.maximum(sin_theta, 1e-10)[:, None]   # unit rotation axis
-
-    kv      = np.einsum('ij,ij->i', k, offsets)                # k · offset  (V,)
-    rotated = (offsets * cos_theta[:, None]
-               + np.cross(k, offsets) * sin_theta[:, None]
-               + k * kv[:, None] * (1.0 - cos_theta[:, None]))
-
-    # Near-zero rotation: tangent unchanged, offset unchanged
-    rotated[sin_theta < 1e-7] = offsets[sin_theta < 1e-7]
-
-    return (cp_def + rotated).astype(np.float32)
+    # Translate: add unchanged natural-state offset (preserves cross-section)
+    return (cp_def + offsets).astype(np.float32)
 
 
 def validate_cross_section_preservation(mesh, network, solver_frames, solver_meta,
