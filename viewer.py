@@ -280,7 +280,7 @@ class FramePlayer:
         #            radius (superelastic, per-vertex via snap_v)
         # Phase 2 — thermal   : slow creep 97 % → 100 % as struts warm above Af.
         #            exp_e (Thermal Growth Rate) controls speed: higher = faster.
-        _SNAP_FRAC  = 0.97
+        _SNAP_FRAC  = 1.0
         t_release_v = np.clip((z_max - z_eff) / z_span, 0., 1.)
         t_out_v     = np.clip(t - t_release_v, 0., 1.)
         thermal_v   = _smoothstep(np.minimum(t_out_v * exp_e * 5., 1.))
