@@ -515,21 +515,7 @@ def export_frames(mesh: trimesh.Trimesh,
     cxy = meta[0]['center_xy']
     cx, cy = float(cxy[0]), float(cxy[1])
 
-    # ── Build local frame coords (dense-skeleton binding) ─────────────────────
-    lc = build_vertex_local_coords(mesh, network, cxy)
-
-    # Hybrid strategy:
-    #   Strut-surface vertices (< CLOSE_THRESH from skeleton) → local frame
-    #   Body / solid / far vertices                           → cylindrical
-    # The stent solid body (inner/outer walls, end caps) lies several mm from
-    # any skeleton centreline; cylindrical deformation is correct there.
-    # Strut cross-sections are < 0.5 mm wide, so CLOSE_THRESH cleanly separates
-    # them from the solid body.
-    CLOSE_THRESH  = 0.5   # mm
-    dist_to_skel  = np.sqrt((lc['offset']**2).sum(axis=1))
-    use_local     = dist_to_skel < CLOSE_THRESH   # (V,) bool
-
-    # ── Precompute cylindrical coords (used for body vertices) ────────────────
+    # ── Precompute cylindrical coords ────────────────────────────────────────
     dx = orig[:, 0] - cx;  dy = orig[:, 1] - cy
     r_orig   = np.sqrt(dx**2 + dy**2)
     theta    = np.arctan2(dy, dx)
