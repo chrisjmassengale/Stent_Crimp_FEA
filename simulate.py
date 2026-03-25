@@ -285,6 +285,18 @@ def main():
     print(f"  frame_099.stl = fully deployed")
     print("=" * 60)
 
+    # Auto-generate low-res GIF preview after every run
+    gif_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "deployment_animation.gif")
+    try:
+        from make_gif import generate_gif
+        print("\nGenerating animation preview...")
+        generate_gif(frames_dir=args.output_dir, output_path=gif_path,
+                     fps=15, max_frames=30, dpi=60, verbose=False)
+        print(f"  Preview saved: {gif_path}")
+    except Exception as e:
+        print(f"  [GIF generation skipped: {e}]")
+
     # Launch the interactive viewer (unless suppressed)
     if not args.no_viewer:
         viewer_path = os.path.join(os.path.dirname(__file__), "viewer.py")
