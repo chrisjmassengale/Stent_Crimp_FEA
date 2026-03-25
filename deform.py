@@ -459,21 +459,21 @@ def export_frames(mesh: trimesh.Trimesh,
     cxy = meta[0]['center_xy']
     cx, cy = float(cxy[0]), float(cxy[1])
 
-    # ── Build local frame coords (Step 2: preserves cross-section shape) ──────
-    lc = build_vertex_local_coords(mesh, network, cxy)
+    # ── Precompute cylindrical coords once ────────────────────────────────────
+    dx = orig[:, 0] - cx
+    dy = orig[:, 1] - cy
+    r_orig = np.sqrt(dx ** 2 + dy ** 2)
+    theta  = np.arctan2(dy, dx)
+    z_orig = orig[:, 2]
+    r_center = np.median(r_orig)               # strut centerline radius
+    r_offset = r_orig - r_center               # cross-section radial offset (preserved)
 
-    # ── Precompute natural node geometry ──────────────────────────────────────
-    npos_nat    = network.node_positions.astype(np.float64)
-    node_z_vals = npos_nat[:, 2]
-    node_dx_nat = npos_nat[:, 0] - cx
-    node_dy_nat = npos_nat[:, 1] - cy
-    node_r_nat  = np.sqrt(node_dx_nat**2 + node_dy_nat**2)
-
-    # ── Crown geometry for dwell ───────────────────────────────────────────────
-    z_span_mesh = float(node_z_vals.max() - node_z_vals.min())
+    # ── Crown geometry for dwell (only thing that varies by Z) ────────────────
+    node_z = network.node_positions[:, 2]
+    z_span_mesh = float(z_orig.max() - z_orig.min())
 
     cluster_tol = 0.05 * z_span_mesh
-    z_sorted = np.sort(node_z_vals)
+    z_sorted = np.sort(node_z)
     cluster_centers = [z_sorted[0]]
     for zv in z_sorted[1:]:
         if zv - cluster_centers[-1] > cluster_tol:
@@ -485,17 +485,16 @@ def export_frames(mesh: trimesh.Trimesh,
     crown_arm_length = z_span_mesh / (2.0 * n_cells)
     cell_height = 2.0 * crown_arm_length
 
-    # Per-node graduated crown dwell
-    node_z_in_cell  = (node_z_vals - float(node_z_vals.min())) % cell_height
-    node_z_cell_frac = node_z_in_cell / cell_height
-    node_crown_prox  = 2.0 * np.abs(node_z_cell_frac - 0.5)
-    node_dwell       = crown_arm_length * crown_dwell * node_crown_prox
+    # Graduated crown dwell per vertex
+    z_in_cell = (z_orig - float(z_orig.min())) % cell_height
+    z_cell_frac = z_in_cell / cell_height
+    crown_proximity = 2.0 * np.abs(z_cell_frac - 0.5)
+    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
 
     if verbose:
-        r_range = (np.sqrt((orig[:, 0]-cx)**2 + (orig[:, 1]-cy)**2))
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
-              f"R range: [{r_range.min():.2f}, {r_range.max():.2f}] mm")
+              f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
         print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm, "
               f"max_dwell={crown_arm_length * crown_dwell:.2f} mm")
         print(f"[deform] Transition={transition_frac:.2f}  snap={snap_speed:.1f}  "
@@ -510,53 +509,50 @@ def export_frames(mesh: trimesh.Trimesh,
         crimp_r  = fm['crimp_r']
         deploy_r = fm['deploy_r']
 
-        # ── CRIMP: radial scale skeleton nodes, then reconstruct mesh ─────────
+        # ── CRIMP: uniform radial scale ───────────────────────────────────────
         if fm['type'] == 'crimp':
-            npos_def = npos_nat.copy()
-            npos_def[:, 0] = cx + node_dx_nat * fm['scale']
-            npos_def[:, 1] = cy + node_dy_nat * fm['scale']
-            # Z unchanged
+            r_new = r_center * fm['scale'] + r_offset
+            z_new = z_orig
 
-        # ── DEPLOY: per-node z-based release, then reconstruct mesh ──────────
+        # ── DEPLOY: z-based tube-retraction with snap-back ────────────────────
         else:
-            z_min   = fm['z_min']
-            z_span  = fm['z_span']
-            z_max   = z_min + z_span
+            z_min  = fm['z_min']
+            z_span = fm['z_span']
+            z_max  = z_min + z_span
             z_front = fm['z_front_norm']
 
             tube_tip_z = z_max - z_front * z_span
             trans_len  = transition_frac * z_span
 
-            # Crown dwell shifts the effective Z each node appears to be at
-            z_eff_nodes = node_z_vals - node_dwell
+            # Crown dwell
+            z_effective = z_orig - dwell_per_vertex
 
-            # Released fraction for each node
-            released = _smoothstep((z_eff_nodes - tube_tip_z) / trans_len)
+            # Per-vertex released fraction (smoothstep over transition zone)
+            d = z_effective - tube_tip_z
+            released = _smoothstep(d / trans_len)
             snap     = _snap_curve(released, snap_speed)
 
-            # Two-phase superelastic deployment per node
-            # Phase 1 — snap: exits tube → 97% of deployed radius instantly
-            # Phase 2 — thermal: 97%→100% as struts warm above Af
+            # Two-phase superelastic deployment
+            # Phase 1 — snap-back : exits tube → 97% of deployed radius
+            # Phase 2 — thermal   : 97% → 100% as struts warm above Af
             _SNAP_FRAC   = 0.97
             t_global     = float(np.clip(z_front, 0., 1.))
-            t_release_n  = np.clip((z_max - z_eff_nodes) / max(z_span, 1e-6), 0., 1.)
-            t_out_n      = np.clip(t_global - t_release_n, 0., 1.)
-            thermal_n    = _smoothstep(np.minimum(t_out_n * expansion_exponent * 5., 1.))
+            t_release_v  = np.clip((z_max - z_effective) / max(z_span, 1e-6), 0., 1.)
+            t_out_v      = np.clip(t_global - t_release_v, 0., 1.)
+            thermal_v    = _smoothstep(np.minimum(t_out_v * expansion_exponent * 5., 1.))
 
-            r_snap_tgt    = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
-            r_node_target = (crimp_r
-                             + (r_snap_tgt - crimp_r)   * snap
-                             + (deploy_r   - r_snap_tgt) * thermal_n * released)
+            r_snap_tgt   = crimp_r + _SNAP_FRAC * (deploy_r - crimp_r)
+            r_centerline = (crimp_r
+                            + (r_snap_tgt - crimp_r)   * snap
+                            + (deploy_r   - r_snap_tgt) * thermal_v * released)
+            r_new = r_centerline + r_offset
+            z_new = z_orig
 
-            # Scale each node radially from its natural position
-            s_nodes = np.where(node_r_nat > 1e-8, r_node_target / node_r_nat, 1.0)
-            npos_def = npos_nat.copy()
-            npos_def[:, 0] = cx + node_dx_nat * s_nodes
-            npos_def[:, 1] = cy + node_dy_nat * s_nodes
-            # Z unchanged
-
-        # ── Reconstruct mesh vertices from local frame offsets ────────────────
-        new_verts = reconstruct_vertices_from_local_coords(lc, npos_def)
+        # ── Convert back to cartesian ─────────────────────────────────────────
+        new_verts = np.empty_like(orig)
+        new_verts[:, 0] = cx + r_new * np.cos(theta)
+        new_verts[:, 1] = cy + r_new * np.sin(theta)
+        new_verts[:, 2] = z_new
 
         # ── Write STL ─────────────────────────────────────────────────────────
         deformed = trimesh.Trimesh(
