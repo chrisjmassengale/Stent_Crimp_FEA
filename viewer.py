@@ -209,6 +209,39 @@ class FramePlayer:
         ext = float((v1f.max(0) - v1f.min(0)).max())
         self.scale  = 20. / max(ext, 1e-6)
 
+        # ── Identify long axial struts via skeleton ───────────────────────────
+        # Same approach as deform.py: bind mesh vertices to skeleton edges,
+        # detect long nearly-axial edges, store masks + z-spans for r_cl override.
+        try:
+            from topology import load_and_extract
+            from deform import build_vertex_local_coords
+            _, network = load_and_extract(str(self.paths[-1]), verbose=False)
+            mesh_dep   = trimesh.load(str(self.paths[-1]), process=False, force='mesh')
+            center_xy  = np.array([cx, cy])
+            lc         = build_vertex_local_coords(mesh_dep, network, center_xy)
+            npos       = network.node_positions.astype(np.float64)
+            edges      = list(network.graph.edges())
+            cs_dist    = np.sqrt(lc['r_comp']**2 + lc['n_comp']**2)
+            self._axial_strut_data = []
+            for ei, (u, v) in enumerate(edges):
+                dz  = abs(npos[v, 2] - npos[u, 2])
+                dxy = float(np.linalg.norm(npos[v, :2] - npos[u, :2]))
+                if dz < 30.0 or dxy > dz * 0.12:
+                    continue
+                v_mask = (lc['edge_idx'] == ei) & (cs_dist < 1.0)
+                if v_mask.sum() < 8:
+                    continue
+                self._axial_strut_data.append({
+                    'mask':  v_mask,
+                    'z_top': max(float(npos[u, 2]), float(npos[v, 2])),
+                    'z_bot': min(float(npos[u, 2]), float(npos[v, 2])),
+                })
+            print(f"[viewer] Axial struts: {len(self._axial_strut_data)}  "
+                  f"({sum(d['mask'].sum() for d in self._axial_strut_data)} vertices)")
+        except Exception as _e:
+            print(f"[viewer] Axial strut detection skipped: {_e}")
+            self._axial_strut_data = []
+
         # Pre-allocate VBO
         n = len(f) * 3
         if self.vbo is None:
