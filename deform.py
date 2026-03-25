@@ -302,8 +302,19 @@ def validate_cross_section_preservation(mesh, network, solver_frames, solver_met
           f"thick (r_hat) = {r_on.max()-r_on.min():.4f} mm")
     print()
 
-    t_positions = [0.25, 0.50, 0.75]
-    window      = 0.15   # ± half-window in t_param
+    # Adaptive measurement positions — derived from where close vertices actually sit,
+    # so windows always contain vertices regardless of how the edge is parameterised.
+    t_positions = sorted([
+        float(np.percentile(t_s, 20)),
+        float(np.percentile(t_s, 50)),
+        float(np.percentile(t_s, 80)),
+    ])
+    t_spread = t_positions[2] - t_positions[0]
+    window   = max(t_spread * 0.35, 0.04)
+    if t_spread < 0.10:
+        print(f"[validate] Warning: close vertices span only {t_spread:.3f} of the edge "
+              f"(t=[{t_positions[0]:.3f},{t_positions[2]:.3f}]) — "
+              "measuring at a single cross-section section only")
 
     # ── Deformation states ────────────────────────────────────────────────────
     n_crimp = sum(1 for m in solver_meta if m['type'] == 'crimp')
