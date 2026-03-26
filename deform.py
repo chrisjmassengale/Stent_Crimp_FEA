@@ -523,40 +523,6 @@ def export_frames(mesh: trimesh.Trimesh,
     r_center = np.median(r_orig)
     r_offset = r_orig - r_center
 
-    # ── Skeleton binding — used to identify long axial strut vertices ────────
-    # We use the skeleton purely to find which vertices belong to which strut
-    # edges and at what t_param along the edge.  The binding distances here can
-    # be large; we filter by edge identity + a generous cs_dist cutoff later.
-    lc_export = build_vertex_local_coords(mesh, network, cxy)
-
-    # Identify long nearly-axial strut edges (dz large, radial drift small).
-    # For these struts the solver-computed per-node radius already varies
-    # smoothly with the deployment front; we interpolate along the strut
-    # instead of reading each vertex's own z independently.
-    _npos     = network.node_positions.astype(np.float64)
-    _edges    = list(network.graph.edges())
-    _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
-
-    AXIAL_MIN_DZ      = 30.0   # mm — z-span threshold for "long" strut
-    AXIAL_MAX_DXY_RAT = 0.12   # max XY drift / dz ratio to be "nearly axial"
-    AXIAL_BIND_MAX    = 1.0    # mm — max cross-section distance (≈ strut radius)
-
-    axial_strut_list = []   # list of dicts: mask, u, v, t_params
-    for ei, (u, v) in enumerate(_edges):
-        dz  = abs(_npos[v, 2] - _npos[u, 2])
-        dxy = float(np.linalg.norm(_npos[v, :2] - _npos[u, :2]))
-        if dz < AXIAL_MIN_DZ or dxy > dz * AXIAL_MAX_DXY_RAT:
-            continue
-        v_mask = (lc_export['edge_idx'] == ei) & (_cs_dist < AXIAL_BIND_MAX)
-        if v_mask.sum() < 8:
-            continue
-        axial_strut_list.append({
-            'mask': v_mask,
-            'u':    u,
-            'v':    v,
-            't':    lc_export['t_param'][v_mask],
-        })
-
     # ── Crown geometry for dwell ──────────────────────────────────────────────
     node_z      = network.node_positions[:, 2]
     z_span_mesh = float(z_orig.max() - z_orig.min())
