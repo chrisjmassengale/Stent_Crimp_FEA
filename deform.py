@@ -565,7 +565,7 @@ def export_frames(mesh: trimesh.Trimesh,
             r_new = r_center * fm['scale'] + r_offset
 
         # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY — cylindrical base + strut-level r override for long axial struts
+        # DEPLOY — pure per-vertex cylindrical release
         # ──────────────────────────────────────────────────────────────────────
         else:
             z_min  = fm['z_min'];   z_span = fm['z_span']
@@ -574,44 +574,10 @@ def export_frames(mesh: trimesh.Trimesh,
             deploy_travel = z_max - (_deploy_eff_zmin - trans_len)
             tube_tip_z    = z_max - z_front * deploy_travel
 
-            # Per-vertex cylindrical release
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
-            # Snap alone reaches deploy_r (snap_frac = 1.0).
-            r_cl = crimp_r + (deploy_r - crimp_r) * snap_v
-
-            # ── Long axial strut override ────────────────────────────────────
-            # Replace per-vertex z-based r_cl with strut-level interpolation.
-            # Computes release fraction at each strut endpoint using the SAME
-            # z-based formula as the rest of the mesh, then interpolates with a
-            # Hermite curve along the strut.  This eliminates the mismatch that
-            # occurs when solver node radii (a separate data source) were used.
-            z_orig_min = float(z_orig.min())
-            for sd in axial_strut_list:
-                z_u = float(_npos[sd['u'], 2])
-                z_v = float(_npos[sd['v'], 2])
-
-                def _dwell_at_z(z_val):
-                    z_in_c = (z_val - z_orig_min) % cell_height
-                    cp = 2.0 * abs(z_in_c / cell_height - 0.5)
-                    return crown_arm_length * crown_dwell * cp
-
-                z_eff_u = z_u - _dwell_at_z(z_u)
-                z_eff_v = z_v - _dwell_at_z(z_v)
-
-                released_u = _smoothstep((z_eff_u - tube_tip_z) / trans_len)
-                released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
-                snap_u = _snap_curve(released_u, snap_speed)
-                snap_v = _snap_curve(released_v, snap_speed)
-                r_cl_u = crimp_r + (deploy_r - crimp_r) * snap_u
-                r_cl_v = crimp_r + (deploy_r - crimp_r) * snap_v
-
-                t   = sd['t']
-                t_s = t * t * (3.0 - 2.0 * t)   # Hermite smoothstep
-                r_cl[sd['mask']] = r_cl_u + (r_cl_v - r_cl_u) * t_s
-
-            r_new = r_cl + r_offset
+            r_new      = crimp_r + (deploy_r - crimp_r) * snap_v + r_offset
 
         # ── Reconstruct vertices (pure cylindrical — both crimp and deploy) ───
         new_verts = np.empty_like(orig)
