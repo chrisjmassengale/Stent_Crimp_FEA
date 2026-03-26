@@ -620,24 +620,33 @@ def export_frames(mesh: trimesh.Trimesh,
 
             # ── Long axial strut override ────────────────────────────────────
             # Replace per-vertex z-based r_cl with strut-level interpolation.
-            # Uses the solver's per-node radius (already encodes the release
-            # state) and adds a sinusoidal outward bow when one end is more
-            # deployed than the other — matching the elastic spring-back arc
-            # a real Nitinol beam forms under unequal end conditions.
-            BOW_FRAC = 0.18   # bow amplitude as fraction of radius differential
-            node_pos = frames[idx]   # (N_nodes, 3)
+            # Computes release fraction at each strut endpoint using the SAME
+            # z-based formula as the rest of the mesh, then interpolates with a
+            # Hermite curve along the strut.  This eliminates the mismatch that
+            # occurs when solver node radii (a separate data source) were used.
+            z_orig_min = float(z_orig.min())
             for sd in axial_strut_list:
-                p_u = node_pos[sd['u']];  p_v = node_pos[sd['v']]
-                r_u = float(np.sqrt((p_u[0] - cx)**2 + (p_u[1] - cy)**2))
-                r_v = float(np.sqrt((p_v[0] - cx)**2 + (p_v[1] - cy)**2))
+                z_u = float(_npos[sd['u'], 2])
+                z_v = float(_npos[sd['v'], 2])
+
+                def _dwell_at_z(z_val):
+                    z_in_c = (z_val - z_orig_min) % cell_height
+                    cp = 2.0 * abs(z_in_c / cell_height - 0.5)
+                    return crown_arm_length * crown_dwell * cp
+
+                z_eff_u = z_u - _dwell_at_z(z_u)
+                z_eff_v = z_v - _dwell_at_z(z_v)
+
+                released_u = _smoothstep((z_eff_u - tube_tip_z) / trans_len)
+                released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
+                snap_u = _snap_curve(released_u, snap_speed)
+                snap_v = _snap_curve(released_v, snap_speed)
+                r_cl_u = crimp_r + (deploy_r - crimp_r) * snap_u
+                r_cl_v = crimp_r + (deploy_r - crimp_r) * snap_v
+
                 t   = sd['t']
-                # Smooth Hermite interpolation (S-curve rather than linear kink)
-                t_s = t * t * (3.0 - 2.0 * t)
-                r_interp = r_u + (r_v - r_u) * t_s
-                # Outward bow: active only when top is more deployed than bottom.
-                # Peaks at t=0.5 (strut midpoint), zero at both endpoints.
-                bow = BOW_FRAC * max(0.0, r_u - r_v) * np.sin(np.pi * t)
-                r_cl[sd['mask']] = r_interp + bow
+                t_s = t * t * (3.0 - 2.0 * t)   # Hermite smoothstep
+                r_cl[sd['mask']] = r_cl_u + (r_cl_v - r_cl_u) * t_s
 
             r_new = r_cl + r_offset
 
