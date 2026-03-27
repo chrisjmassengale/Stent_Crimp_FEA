@@ -593,7 +593,7 @@ def export_frames(mesh: trimesh.Trimesh,
             r_new = r_center * fm['scale'] + r_offset
 
         # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY — pure per-vertex cylindrical release
+        # DEPLOY — per-vertex cylindrical release + additive bow for long struts
         # ──────────────────────────────────────────────────────────────────────
         else:
             z_min  = fm['z_min'];   z_span = fm['z_span']
@@ -605,7 +605,39 @@ def export_frames(mesh: trimesh.Trimesh,
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
-            r_new      = crimp_r + (deploy_r - crimp_r) * snap_v + r_offset
+            r_cl       = crimp_r + (deploy_r - crimp_r) * snap_v
+
+            # ── Additive bow for long axial struts ───────────────────────────
+            # For struts spanning the deployment front, the base formula gives
+            # each vertex its own independent radius — producing a sharp kink
+            # where the front crosses the strut.  Instead we ADD a smooth arc
+            # (zero at both endpoints, peaks at midpoint) whose amplitude scales
+            # with the radius difference between the two endpoints.  Because the
+            # correction is additive and zero at t=0 and t=1, the strut endpoints
+            # remain identical to the surrounding mesh — no boundary artifact.
+            z_orig_min = float(z_orig.min())
+
+            def _r_at_z(z_val):
+                """Per-vertex formula evaluated at an arbitrary z (for endpoints)."""
+                z_in_c = (z_val - z_orig_min) % cell_height
+                cp     = 2.0 * abs(z_in_c / cell_height - 0.5)
+                dwell  = crown_arm_length * crown_dwell * cp
+                snap   = _snap_curve(
+                    _smoothstep((z_val - dwell - tube_tip_z) / trans_len),
+                    snap_speed)
+                return crimp_r + (deploy_r - crimp_r) * snap
+
+            for sd in axial_strut_list:
+                r_u   = _r_at_z(float(_npos[sd['u'], 2]))
+                r_v   = _r_at_z(float(_npos[sd['v'], 2]))
+                delta = abs(r_v - r_u)
+                if delta < 0.1:          # both endpoints at same state → no bow
+                    continue
+                t   = sd['t']            # t=0 at u, t=1 at v
+                bow = BOW_FRAC * delta * np.sin(np.pi * t)
+                r_cl[sd['mask']] += bow
+
+            r_new = r_cl + r_offset
 
         # ── Reconstruct vertices (pure cylindrical — both crimp and deploy) ───
         new_verts = np.empty_like(orig)
