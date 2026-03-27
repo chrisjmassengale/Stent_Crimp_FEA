@@ -548,8 +548,6 @@ def export_frames(mesh: trimesh.Trimesh,
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
         print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm")
-        print(f"[deform] Long axial struts: {len(axial_strut_list)}  "
-              f"({sum(d['mask'].sum() for d in axial_strut_list)} vertices get bow correction)")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
