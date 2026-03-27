@@ -523,32 +523,6 @@ def export_frames(mesh: trimesh.Trimesh,
     r_center = np.median(r_orig)
     r_offset = r_orig - r_center
 
-    # ── Skeleton binding — to identify long axial strut vertices ─────────────
-    # We bind vertices to skeleton edges so we know which ones belong to long
-    # nearly-axial struts.  These struts get an additive bow correction on top
-    # of the base per-vertex formula (endpoints unchanged → no boundary artifact).
-    lc_export = build_vertex_local_coords(mesh, network, cxy)
-    _npos     = network.node_positions.astype(np.float64)
-    _edges    = list(network.graph.edges())
-    _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
-
-    AXIAL_MIN_DZ      = 30.0   # mm — z-span for "long" strut
-    AXIAL_MAX_DXY_RAT = 0.12   # max XY drift / dz for "nearly axial"
-    AXIAL_BIND_MAX    = 1.0    # mm — max binding dist (≈ strut radius)
-    BOW_FRAC          = 0.15   # bow amplitude as fraction of endpoint r-delta
-
-    axial_strut_list = []
-    for ei, (u, v) in enumerate(_edges):
-        dz  = abs(_npos[v, 2] - _npos[u, 2])
-        dxy = float(np.linalg.norm(_npos[v, :2] - _npos[u, :2]))
-        if dz < AXIAL_MIN_DZ or dxy > dz * AXIAL_MAX_DXY_RAT:
-            continue
-        v_mask = (lc_export['edge_idx'] == ei) & (_cs_dist < AXIAL_BIND_MAX)
-        if v_mask.sum() < 8:
-            continue
-        axial_strut_list.append({'mask': v_mask, 'u': u, 'v': v,
-                                  't': lc_export['t_param'][v_mask]})
-
     # ── Crown geometry for dwell ──────────────────────────────────────────────
     node_z      = network.node_positions[:, 2]
     z_span_mesh = float(z_orig.max() - z_orig.min())
