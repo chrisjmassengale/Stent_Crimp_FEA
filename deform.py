@@ -565,7 +565,7 @@ def export_frames(mesh: trimesh.Trimesh,
             r_new = r_center * fm['scale'] + r_offset
 
         # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY — two-mode z_eff release (precomputed above the frame loop)
+        # DEPLOY — pure per-vertex cylindrical release
         # ──────────────────────────────────────────────────────────────────────
         else:
             z_min  = fm['z_min'];   z_span = fm['z_span']
@@ -574,6 +574,7 @@ def export_frames(mesh: trimesh.Trimesh,
             deploy_travel = z_max - (_deploy_eff_zmin - trans_len)
             tube_tip_z    = z_max - z_front * deploy_travel
 
+            z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
             r_new      = crimp_r + (deploy_r - crimp_r) * snap_v + r_offset
