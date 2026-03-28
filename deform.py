@@ -543,46 +543,11 @@ def export_frames(mesh: trimesh.Trimesh,
     dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
     _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
 
-    # ── Long axial strut snap blending ───────────────────────────────────────
-    # Problem: snap_curve (1-(1-t)^speed) front-loads 87% of the radius change
-    # into the bottom half of the transition zone, making long struts kink at
-    # a sharp angle instead of bending smoothly.
-    #
-    # Fix: for long axial strut vertices, blend snap_curve toward the raw
-    # released_v (linear snap, speed=1) using weight = sin(pi * t_param).
-    #   t_param = 0 or 1 (strut endpoints)  → blend = 0 → unmodified fast snap
-    #                                           (matches adjacent diamond cells exactly)
-    #   t_param = 0.5    (strut midpoint)   → blend = 1 → linear snap
-    #                                           (radius changes gradually along strut)
-    # Because blend is zero at both endpoints, there is no discontinuity with
-    # the surrounding mesh at junctions.
-    lc_export = build_vertex_local_coords(mesh, network, cxy)
-    _npos     = network.node_positions.astype(np.float64)
-    _edges    = list(network.graph.edges())
-    _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
-
-    AXIAL_MIN_DZ      = 30.0   # mm
-    AXIAL_MAX_DXY_RAT = 0.12
-    AXIAL_BIND_MAX    = 1.0    # mm
-
-    axial_blend = np.zeros(len(z_orig), dtype=np.float64)
-    for ei, (u, v) in enumerate(_edges):
-        dz  = abs(_npos[v, 2] - _npos[u, 2])
-        dxy = float(np.linalg.norm(_npos[v, :2] - _npos[u, :2]))
-        if dz < AXIAL_MIN_DZ or dxy > dz * AXIAL_MAX_DXY_RAT:
-            continue
-        vm = (lc_export['edge_idx'] == ei) & (_cs_dist < AXIAL_BIND_MAX)
-        if vm.sum() < 8:
-            continue
-        t = lc_export['t_param'][vm]
-        axial_blend[vm] = np.maximum(axial_blend[vm], np.sin(np.pi * t))
-
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
-        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm  "
-              f"| axial blend verts: {(axial_blend > 0).sum()}/{len(z_orig)}")
+        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
