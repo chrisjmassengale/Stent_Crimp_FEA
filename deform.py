@@ -538,16 +538,53 @@ def export_frames(mesh: trimesh.Trimesh,
     crown_arm_length = z_span_mesh / (2.0 * n_cells)
     cell_height = 2.0 * crown_arm_length
 
-    z_in_cell        = (z_orig - float(z_orig.min())) % cell_height
-    crown_proximity  = 2.0 * np.abs(z_in_cell / cell_height - 0.5)
-    dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
-    _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
+    # ── Two-mode z_eff ────────────────────────────────────────────────────────
+    # Mode A (short/cell vertices): z_eff = z of nearest crown ring AT OR BELOW
+    #   the vertex.  All vertices in a cell share the same z_eff → they all snap
+    #   to deployed radius simultaneously once the cell bottom clears the tube.
+    # Mode B (long axial strut vertices): z_eff = vertex's own z_orig.
+    #   Monotonically increasing along the strut → smooth expansion top-to-bottom
+    #   with no oscillation from periodic dwell.
+    # Continuity guarantee: junctions between long struts and cells sit exactly
+    #   at crown ring z positions, where both modes agree (z_crown = z_orig).
+
+    crown_zs = np.sort(np.array(cluster_centers, dtype=np.float64))
+    idx_cw   = np.searchsorted(crown_zs, z_orig, side='right') - 1
+    idx_cl   = np.clip(idx_cw, 0, len(crown_zs) - 1)
+    # Default: z_eff = z of the crown ring just below each vertex (Mode A)
+    z_eff_v  = np.where(idx_cw >= 0, crown_zs[idx_cl], z_orig)
+    z_eff_v  = np.where(z_orig < crown_zs[0], z_orig, z_eff_v)   # below all crowns
+
+    # Detect long axial struts and override to Mode B
+    lc_export = build_vertex_local_coords(mesh, network, cxy)
+    _npos     = network.node_positions.astype(np.float64)
+    _edges    = list(network.graph.edges())
+    _cs_dist  = np.sqrt(lc_export['r_comp']**2 + lc_export['n_comp']**2)
+
+    AXIAL_MIN_DZ      = 30.0   # mm
+    AXIAL_MAX_DXY_RAT = 0.12
+    AXIAL_BIND_MAX    = 1.0    # mm
+
+    axial_mask = np.zeros(len(z_orig), dtype=bool)
+    for ei, (u, v) in enumerate(_edges):
+        dz  = abs(_npos[v, 2] - _npos[u, 2])
+        dxy = float(np.linalg.norm(_npos[v, :2] - _npos[u, :2]))
+        if dz < AXIAL_MIN_DZ or dxy > dz * AXIAL_MAX_DXY_RAT:
+            continue
+        vm = (lc_export['edge_idx'] == ei) & (_cs_dist < AXIAL_BIND_MAX)
+        if vm.sum() >= 8:
+            axial_mask |= vm
+
+    z_eff_v[axial_mask] = z_orig[axial_mask]   # Mode B: use own z
+
+    _deploy_eff_zmin = float(z_eff_v.min())
 
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
-        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm")
+        print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm  "
+              f"| axial mode-B verts: {axial_mask.sum()}/{len(z_orig)}")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
