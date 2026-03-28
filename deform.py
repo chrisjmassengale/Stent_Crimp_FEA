@@ -565,7 +565,7 @@ def export_frames(mesh: trimesh.Trimesh,
             r_new = r_center * fm['scale'] + r_offset
 
         # ──────────────────────────────────────────────────────────────────────
-        # DEPLOY — per-vertex release with axial-strut snap blending
+        # DEPLOY — pure per-vertex cylindrical release
         # ──────────────────────────────────────────────────────────────────────
         else:
             z_min  = fm['z_min'];   z_span = fm['z_span']
@@ -577,11 +577,6 @@ def export_frames(mesh: trimesh.Trimesh,
             z_eff_v    = z_orig - dwell_per_vertex
             released_v = _smoothstep((z_eff_v - tube_tip_z) / trans_len)
             snap_v     = _snap_curve(released_v, snap_speed)
-            # Blend long-strut midpoints toward linear snap (speed=1) so the
-            # radius changes gradually along the strut → smooth arc, not kink.
-            # axial_blend = 0 at endpoints → fast snap (matches diamond cells)
-            # axial_blend = 1 at midpoint  → linear snap (smooth curvature)
-            snap_v     = snap_v + axial_blend * (released_v - snap_v)
             r_new      = crimp_r + (deploy_r - crimp_r) * snap_v + r_offset
 
         # ── Reconstruct vertices (pure cylindrical — both crimp and deploy) ───
