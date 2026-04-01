@@ -144,7 +144,7 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
                   f"(kept {int(long_edge.sum()) - n_stretched} long strut faces)")
         mesh = trimesh.Trimesh(vertices=v, faces=good_faces, process=False)
 
-    return mesh
+    return mesh, xform
 
 
 def _weld_seam_vertices(mesh: trimesh.Trimesh,
