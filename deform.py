@@ -502,6 +502,7 @@ def export_frames(mesh: trimesh.Trimesh,
                   snap_speed: float = SNAP_SPEED,
                   crown_dwell: float = CROWN_DWELL,
                   expansion_exponent: float = EXPANSION_EXP,
+                  cloth_mesh: 'trimesh.Trimesh | None' = None,
                   **kwargs) -> List[str]:
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
