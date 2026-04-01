@@ -591,14 +591,25 @@ def export_frames(mesh: trimesh.Trimesh,
         cloth_z_orig   = cloth_orig[:, 2]
         cloth_r_center = np.median(cloth_r_orig)
         cloth_r_offset = cloth_r_orig - cloth_r_center
-        cloth_r_natural = float(cloth_r_center)  # taut radius (no ripple)
+        # Ripple disappears when radius reaches ripple_max * deployed radius.
+        # This means even at "full" deployment the cloth still has some folds.
+        cloth_r_taut = float(cloth_r_center) * ripple_max
 
         # Ripple parameters
         CLOTH_N_WAVES = 16          # number of folds around circumference
         CLOTH_Z_TWIST = 0.3        # radians of phase twist per mm of Z (slight helix)
+        CLOTH_INTENSITY = 0.55      # scale factor on arc-length amplitude (soften the effect)
         # Phase = n*theta + twist*z  gives gentle helical fold pattern
         cloth_ripple_phase = (CLOTH_N_WAVES * cloth_theta
                               + CLOTH_Z_TWIST * cloth_z_orig)
+        # Per-wave amplitude variance: each of the 16 waves gets a random
+        # multiplier in [0.6, 1.0] so folds aren't perfectly uniform.
+        rng = np.random.default_rng(42)   # fixed seed for reproducibility
+        wave_variance = rng.uniform(0.6, 1.0, CLOTH_N_WAVES)
+        # Map each vertex to its nearest wave index and look up its multiplier
+        wave_idx = np.floor(((cloth_theta + np.pi) / (2 * np.pi)) * CLOTH_N_WAVES).astype(int)
+        wave_idx = np.clip(wave_idx, 0, CLOTH_N_WAVES - 1)
+        cloth_wave_scale = wave_variance[wave_idx]
 
         # Crown dwell for cloth vertices (same geometry as stent)
         cloth_z_in_cell       = (cloth_z_orig - float(cloth_z_orig.min())) % cell_height
