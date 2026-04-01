@@ -490,6 +490,43 @@ def _snap_curve(t, speed=SNAP_SPEED):
     return 1.0 - (1.0 - t) ** speed
 
 
+def _cloth_ripple_amplitude(r_mean, r_natural, n_waves):
+    """
+    Compute sinusoidal ripple amplitude from circumference conservation.
+
+    The cloth has natural circumference C0 = 2π·r_natural.  At mean radius
+    r_mean < r_natural the smooth circumference would be 2π·r_mean, which is
+    too short — the excess material buckles into folds.
+
+    For r(θ) = r_mean + A·sin(n·θ) the arc length is:
+        L = ∫₀²π √(r² + (dr/dθ)²) dθ  = ∫₀²π √((r_m+A·sin)² + (A·n·cos)²) dθ
+
+    We solve for A such that L = 2π·r_natural using bisection.
+    """
+    if r_mean >= r_natural:
+        return 0.0
+
+    target = 2.0 * np.pi * r_natural
+    N_QUAD = 512   # quadrature points
+
+    def _arc_length(amp):
+        th = np.linspace(0.0, 2.0 * np.pi, N_QUAD, endpoint=False)
+        r  = r_mean + amp * np.sin(n_waves * th)
+        dr = amp * n_waves * np.cos(n_waves * th)
+        ds = np.sqrt(r**2 + dr**2)
+        return ds.sum() * (2.0 * np.pi / N_QUAD)
+
+    # Bisection: amplitude in [0, r_mean*0.95] (can't exceed mean radius)
+    lo, hi = 0.0, r_mean * 0.95
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if _arc_length(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 # ── frame export (the only public entry point) ────────────────────────────────
 
 def export_frames(mesh: trimesh.Trimesh,
