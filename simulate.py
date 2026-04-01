@@ -230,8 +230,13 @@ def main():
             sys.exit(1)
         import trimesh
         cloth_mesh = trimesh.load(args.cloth, process=False, force='mesh')
+        # Apply the same scale/rotation/centering transform as the stent
+        cloth_mesh.apply_transform(preprocess_xform)
         print(f"  Cloth mesh loaded: {len(cloth_mesh.vertices):,} verts, "
               f"{len(cloth_mesh.faces):,} faces")
+        print(f"  Cloth bounds: X=[{cloth_mesh.bounds[0][0]:.2f}, {cloth_mesh.bounds[1][0]:.2f}] "
+              f"Y=[{cloth_mesh.bounds[0][1]:.2f}, {cloth_mesh.bounds[1][1]:.2f}] "
+              f"Z=[{cloth_mesh.bounds[0][2]:.2f}, {cloth_mesh.bounds[1][2]:.2f}]")
         print()
 
     # Step 2: Run FEA simulation
