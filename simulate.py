@@ -73,6 +73,8 @@ def parse_args():
                    help="Do not auto-launch the viewer after simulation completes")
     p.add_argument("--cloth", type=str, default=None,
                    help="Path to cloth/membrane STL file (deformed alongside stent, output as cloth_NNN.stl)")
+    p.add_argument("--ripple-max", type=float, default=0.80,
+                   help="Fraction of deployed diameter at which cloth ripple reaches zero (default: 0.80)")
     return p.parse_args()
 
 
