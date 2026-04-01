@@ -30,7 +30,7 @@ MAX_COLLINEAR_ANGLE_DEG = 15.0    # chain edges if angle between them < this thr
 
 def preprocess_mesh(mesh: trimesh.Trimesh,
                     deployed_diameter_mm: float = None,
-                    verbose: bool = True) -> trimesh.Trimesh:
+                    verbose: bool = True) -> tuple:
     """
     Standardise the mesh before topology extraction:
       1. Detect and convert units to mm.
@@ -43,7 +43,14 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
       - If longest extent > 5    → assume cm (×10)
       - Otherwise                → assume inches (×25.4)
       If deployed_diameter_mm is supplied, that cross-check is used instead.
+
+    Returns
+    -------
+    mesh : trimesh.Trimesh
+    xform : (4,4) ndarray — composite transform applied (for reuse on other meshes)
     """
+    xform = np.eye(4)   # accumulate all transforms
+
     extents = mesh.extents
     longest = extents.max()
 
@@ -70,6 +77,8 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
                   f"(longest extent {longest:.4f} -> {longest*scale:.1f} mm)")
         mesh = mesh.copy()
         mesh.apply_scale(scale)
+        S = np.eye(4) * scale; S[3, 3] = 1.0
+        xform = S @ xform
 
     # ── Reorient long axis to Z ───────────────────────────────────────────────
     extents2 = mesh.extents
@@ -87,6 +96,7 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
             R = trimesh.transformations.rotation_matrix( np.pi/2, [1, 0, 0])
         mesh = mesh.copy()
         mesh.apply_transform(R)
+        xform = R @ xform
 
     # ── Centre: XY at origin, Z bottom at 0 ──────────────────────────────────
     c = mesh.centroid
@@ -96,6 +106,7 @@ def preprocess_mesh(mesh: trimesh.Trimesh,
     t[2, 3] = -mesh.bounds[0, 2]    # shift bottom to Z=0
     mesh = mesh.copy()
     mesh.apply_transform(t)
+    xform = t @ xform
 
     if verbose:
         print(f"[topology] After preprocessing: extents={mesh.extents.round(2)} mm, "
