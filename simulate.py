@@ -174,6 +174,8 @@ def main():
     print(f"  Snap speed       : {args.snap_speed}")
     print(f"  Crown dwell      : {args.crown_dwell}")
     print(f"  Expansion exp    : {args.expansion_exponent}")
+    if args.cloth:
+        print(f"  Cloth membrane   : {args.cloth}")
     print()
 
     # ── STL file inspection (runs every time so changes are always visible) ──
