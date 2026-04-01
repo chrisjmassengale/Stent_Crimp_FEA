@@ -287,7 +287,8 @@ def main():
                               snap_speed=args.snap_speed,
                               crown_dwell=args.crown_dwell,
                               expansion_exponent=args.expansion_exponent,
-                              tine_flare=args.tine_flare)
+                              tine_flare=args.tine_flare,
+                              cloth_mesh=cloth_mesh)
     except Exception as e:
         print(f"Fatal: frame export failed — {e}", file=sys.stderr)
         import traceback
