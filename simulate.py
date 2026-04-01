@@ -71,6 +71,8 @@ def parse_args():
                    help="Crown tine flare factor: tines expand to this * deployed_r (default: 1.15)")
     p.add_argument("--no-viewer", action="store_true",
                    help="Do not auto-launch the viewer after simulation completes")
+    p.add_argument("--cloth", type=str, default=None,
+                   help="Path to cloth/membrane STL file (deformed alongside stent, output as cloth_NNN.stl)")
     return p.parse_args()
 
 
