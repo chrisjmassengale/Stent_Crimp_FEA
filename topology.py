@@ -286,8 +286,8 @@ def load_and_extract(stl_path: str, verbose: bool = True,
               f"{len(mesh.faces)} faces, watertight={mesh.is_watertight}")
 
     # ── Preprocessing: units, orientation, centering ──────────────────────────
-    mesh = preprocess_mesh(mesh, deployed_diameter_mm=deployed_diameter_mm,
-                           verbose=verbose)
+    mesh, preprocess_xform = preprocess_mesh(mesh, deployed_diameter_mm=deployed_diameter_mm,
+                                              verbose=verbose)
 
     bb_min, bb_max = bounding_box(mesh.vertices)
     diag = np.linalg.norm(bb_max - bb_min)
