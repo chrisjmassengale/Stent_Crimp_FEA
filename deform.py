@@ -659,10 +659,10 @@ def export_frames(mesh: trimesh.Trimesh,
         deformed.export(str(fname))
         paths.append(str(fname))
 
-        # ── Cloth membrane (same radial deformation) ─────────────────────────
+        # ── Cloth membrane (same radial deformation + ripple) ────────────────
         if cloth_mesh is not None:
             if fm['type'] == 'crimp':
-                cloth_r_new = cloth_r_center * fm['scale'] + cloth_r_offset
+                cloth_r_mean = cloth_r_center * fm['scale']
             else:
                 z_min_c  = fm['z_min'];   z_span_c = fm['z_span']
                 z_max_c  = z_min_c + z_span_c
@@ -674,7 +674,24 @@ def export_frames(mesh: trimesh.Trimesh,
                 z_eff_cloth    = cloth_z_orig - cloth_dwell
                 released_cloth = _smoothstep((z_eff_cloth - tube_tip_z_c) / trans_len_c)
                 snap_cloth     = _snap_curve(released_cloth, snap_speed)
-                cloth_r_new    = crimp_r + (deploy_r - crimp_r) * snap_cloth + cloth_r_offset
+                cloth_r_mean   = crimp_r + (deploy_r - crimp_r) * snap_cloth
+
+            # Ripple: sinusoidal radial perturbation from circumference conservation
+            ripple_amp = _cloth_ripple_amplitude(
+                float(np.median(cloth_r_mean) if isinstance(cloth_r_mean, np.ndarray)
+                      else cloth_r_mean),
+                cloth_r_natural, CLOTH_N_WAVES)
+            # For deployment frames with per-vertex radii, scale amplitude by
+            # each vertex's own crimp fraction so partially-released zones ripple less
+            if isinstance(cloth_r_mean, np.ndarray):
+                vertex_frac = np.clip(
+                    (cloth_r_natural - cloth_r_mean) / max(cloth_r_natural - crimp_r, 1e-10),
+                    0.0, 1.0)
+                ripple = ripple_amp * vertex_frac * np.sin(cloth_ripple_phase)
+            else:
+                ripple = ripple_amp * np.sin(cloth_ripple_phase)
+
+            cloth_r_new = cloth_r_mean + cloth_r_offset + ripple
 
             cloth_new_verts = np.empty_like(cloth_orig)
             cloth_new_verts[:, 0] = cx + cloth_r_new * np.cos(cloth_theta)
