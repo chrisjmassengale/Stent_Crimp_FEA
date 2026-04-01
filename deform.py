@@ -692,16 +692,16 @@ def export_frames(mesh: trimesh.Trimesh,
             ripple_amp = _cloth_ripple_amplitude(
                 float(np.median(cloth_r_mean) if isinstance(cloth_r_mean, np.ndarray)
                       else cloth_r_mean),
-                cloth_r_natural, CLOTH_N_WAVES)
+                cloth_r_taut, CLOTH_N_WAVES) * CLOTH_INTENSITY
             # For deployment frames with per-vertex radii, scale amplitude by
             # each vertex's own crimp fraction so partially-released zones ripple less
             if isinstance(cloth_r_mean, np.ndarray):
                 vertex_frac = np.clip(
-                    (cloth_r_natural - cloth_r_mean) / max(cloth_r_natural - crimp_r, 1e-10),
+                    (cloth_r_taut - cloth_r_mean) / max(cloth_r_taut - crimp_r, 1e-10),
                     0.0, 1.0)
-                ripple = ripple_amp * vertex_frac * np.sin(cloth_ripple_phase)
+                ripple = ripple_amp * vertex_frac * cloth_wave_scale * np.sin(cloth_ripple_phase)
             else:
-                ripple = ripple_amp * np.sin(cloth_ripple_phase)
+                ripple = ripple_amp * cloth_wave_scale * np.sin(cloth_ripple_phase)
 
             cloth_r_new = cloth_r_mean + cloth_r_offset + ripple
 
