@@ -614,6 +614,36 @@ def export_frames(mesh: trimesh.Trimesh,
         deformed.export(str(fname))
         paths.append(str(fname))
 
+        # ── Cloth membrane (same radial deformation) ─────────────────────────
+        if cloth_mesh is not None:
+            if fm['type'] == 'crimp':
+                cloth_r_new = cloth_r_center * fm['scale'] + cloth_r_offset
+            else:
+                z_min_c  = fm['z_min'];   z_span_c = fm['z_span']
+                z_max_c  = z_min_c + z_span_c
+                z_front_c = fm['z_front_norm']
+                trans_len_c     = transition_frac * z_span_c
+                deploy_travel_c = z_max_c - (_cloth_eff_zmin - trans_len_c)
+                tube_tip_z_c    = z_max_c - z_front_c * deploy_travel_c
+
+                z_eff_cloth    = cloth_z_orig - cloth_dwell
+                released_cloth = _smoothstep((z_eff_cloth - tube_tip_z_c) / trans_len_c)
+                snap_cloth     = _snap_curve(released_cloth, snap_speed)
+                cloth_r_new    = crimp_r + (deploy_r - crimp_r) * snap_cloth + cloth_r_offset
+
+            cloth_new_verts = np.empty_like(cloth_orig)
+            cloth_new_verts[:, 0] = cx + cloth_r_new * np.cos(cloth_theta)
+            cloth_new_verts[:, 1] = cy + cloth_r_new * np.sin(cloth_theta)
+            cloth_new_verts[:, 2] = cloth_z_orig
+
+            cloth_def = trimesh.Trimesh(
+                vertices=cloth_new_verts,
+                faces=cloth_mesh.faces.copy(),
+                process=False,
+            )
+            cloth_fname = out_path / f"cloth_{idx:03d}.stl"
+            cloth_def.export(str(cloth_fname))
+
     if verbose:
         print(f"[deform] Wrote {len(paths)} frames ({n_verts}v {n_faces}f each)")
 
