@@ -221,6 +221,18 @@ def main():
     describe_network(network)
     print()
 
+    # ── Load cloth membrane mesh (if provided) ───────────────────────────────
+    cloth_mesh = None
+    if args.cloth:
+        if not os.path.isfile(args.cloth):
+            print(f"Error: cloth file not found: {args.cloth!r}", file=sys.stderr)
+            sys.exit(1)
+        import trimesh
+        cloth_mesh = trimesh.load(args.cloth, process=False, force='mesh')
+        print(f"  Cloth mesh loaded: {len(cloth_mesh.vertices):,} verts, "
+              f"{len(cloth_mesh.faces):,} faces")
+        print()
+
     # Step 2: Run FEA simulation
     print("[2/4] Running FEA simulation...")
     try:
