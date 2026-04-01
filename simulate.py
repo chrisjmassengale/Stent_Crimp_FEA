@@ -210,8 +210,9 @@ def main():
     # Step 1: Topology extraction
     print("[1/4] Extracting beam network from STL...")
     try:
-        mesh, network = load_and_extract(args.input, verbose=verbose,
-                                         deployed_diameter_mm=args.deployed_diameter)
+        mesh, network, preprocess_xform = load_and_extract(
+            args.input, verbose=verbose,
+            deployed_diameter_mm=args.deployed_diameter)
     except Exception as e:
         print(f"Fatal: topology extraction failed — {e}", file=sys.stderr)
         import traceback
