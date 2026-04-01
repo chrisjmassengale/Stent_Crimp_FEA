@@ -315,7 +315,7 @@ def load_and_extract(stl_path: str, verbose: bool = True,
     if verbose:
         print(f"[topology] {network}")
 
-    return mesh, network
+    return mesh, network, preprocess_xform
 
 
 # ── skeleton-based extraction ──────────────────────────────────────────────────
