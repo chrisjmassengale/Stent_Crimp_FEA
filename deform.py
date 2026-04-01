@@ -544,11 +544,29 @@ def export_frames(mesh: trimesh.Trimesh,
     dwell_per_vertex = crown_arm_length * crown_dwell * crown_proximity
     _deploy_eff_zmin = float((z_orig - dwell_per_vertex).min())
 
+    # ── Cloth membrane precomputation ───────────────────────────────────────
+    if cloth_mesh is not None:
+        cloth_orig = cloth_mesh.vertices.copy()
+        cdx = cloth_orig[:, 0] - cx;  cdy = cloth_orig[:, 1] - cy
+        cloth_r_orig   = np.sqrt(cdx**2 + cdy**2)
+        cloth_theta    = np.arctan2(cdy, cdx)
+        cloth_z_orig   = cloth_orig[:, 2]
+        cloth_r_center = np.median(cloth_r_orig)
+        cloth_r_offset = cloth_r_orig - cloth_r_center
+
+        # Crown dwell for cloth vertices (same geometry as stent)
+        cloth_z_in_cell       = (cloth_z_orig - float(cloth_z_orig.min())) % cell_height
+        cloth_crown_proximity = 2.0 * np.abs(cloth_z_in_cell / cell_height - 0.5)
+        cloth_dwell           = crown_arm_length * crown_dwell * cloth_crown_proximity
+        _cloth_eff_zmin       = float((cloth_z_orig - cloth_dwell).min())
+
     if verbose:
         print(f"[deform] Input: {n_verts} verts, {n_faces} faces")
         print(f"[deform] Center: ({cx:.2f}, {cy:.2f})  "
               f"R range: [{r_orig.min():.2f}, {r_orig.max():.2f}] mm")
         print(f"[deform] Crown: {n_cells} cells, arm={crown_arm_length:.2f} mm")
+        if cloth_mesh is not None:
+            print(f"[deform] Cloth: {len(cloth_orig)} verts, {len(cloth_mesh.faces)} faces")
 
     # ── Per-frame deformation ─────────────────────────────────────────────────
     paths: List[str] = []
