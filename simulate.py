@@ -111,7 +111,7 @@ def run_topology_test(stl_path):
     print(f"Topology extraction test: {stl_path}")
     print("=" * 60)
     try:
-        mesh, network = load_and_extract(stl_path, verbose=True, deployed_diameter_mm=None)
+        mesh, network, _ = load_and_extract(stl_path, verbose=True, deployed_diameter_mm=None)
         print("\nMesh quality:")
         q = check_mesh_quality(mesh)
         for k, v in q.items():
